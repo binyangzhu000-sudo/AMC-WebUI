@@ -7,6 +7,7 @@ import { useMessageActions } from './useMessageActions';
 import { finishActiveGenerationJob, startActiveGenerationJob } from '@/features/message-sender/activeGenerationJobs';
 import { useChatStore } from '@/stores/chatStore';
 import { createDeferred, renderHook } from '@/test/render/renderer';
+import { getLiveArtifactsUserDirective } from '@/features/prompts/promptRegistry';
 
 type MessageActionsOptions = Parameters<typeof useMessageActions>[0];
 
@@ -264,11 +265,14 @@ describe('useMessageActions', () => {
     });
 
     expect(sessions).toHaveLength(2);
-    expect(sessions[0].id).not.toBe('session-current');
-    expect(sessions[0].title).toBe('Original chat (Fork)');
-    expect(sessions[0].messages.map((message) => message.content)).toEqual(['first prompt', 'first answer']);
-    expect(sessions[0].messages.map((message) => message.id)).not.toEqual(['user-1', 'model-1']);
-    expect(setActiveSessionId).toHaveBeenCalledWith(sessions[0].id, { history: 'push' });
+    // 新契约：fork 出来的会话紧随源会话，而不是插到列表最前。
+    expect(sessions[0].id).toBe('session-current');
+    const forked = sessions[1];
+    expect(forked.id).not.toBe('session-current');
+    expect(forked.title).toBe('Original chat (Fork)');
+    expect(forked.messages.map((message) => message.content)).toEqual(['first prompt', 'first answer']);
+    expect(forked.messages.map((message) => message.id)).not.toEqual(['user-1', 'model-1']);
+    expect(setActiveSessionId).toHaveBeenCalledWith(forked.id, { history: 'push' });
 
     unmount();
   });
@@ -357,7 +361,7 @@ describe('useMessageActions', () => {
       result.current.handleForkMessage('model-1');
     });
 
-    const forkedMessages = sessions[0].messages;
+    const forkedMessages = sessions[1].messages;
     expect(forkedMessages).toHaveLength(4);
     expect(forkedMessages.map((message) => message.content)).toEqual(['plot sales', '', '', 'Here is the chart.']);
     expect(forkedMessages.map((message) => message.isInternalToolMessage ?? false)).toEqual([false, true, true, false]);
@@ -493,5 +497,45 @@ describe('useMessageActions', () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it('strips live artifacts user directive from message content when editing', () => {
+    const setCommandedInput = vi.fn();
+    const setEditingMessageId = vi.fn();
+    const setEditMode = vi.fn();
+    const rawContentWithDirective = `${getLiveArtifactsUserDirective('zh')}\n\n请帮我分析2026年Q1的财报数据`;
+
+    const messages: ChatMessage[] = [
+      {
+        id: 'user-edit-target',
+        role: 'user',
+        content: rawContentWithDirective,
+        timestamp: new Date('2026-05-01T00:00:00.000Z'),
+      },
+    ];
+
+    const { result, unmount } = renderHook(() =>
+      useMessageActions(
+        createStoreWiredOptions({
+          messages,
+          setCommandedInput,
+          setEditingMessageId,
+          setEditMode,
+        }),
+      ),
+    );
+
+    act(() => {
+      result.current.handleEditMessage('user-edit-target', 'update');
+    });
+
+    expect(setCommandedInput).toHaveBeenCalledWith({
+      text: '请帮我分析2026年Q1的财报数据',
+      id: expect.any(Number),
+    });
+    expect(setEditingMessageId).toHaveBeenCalledWith('user-edit-target');
+    expect(setEditMode).toHaveBeenCalledWith('update');
+
+    unmount();
   });
 });

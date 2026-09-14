@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ChevronLeft, Download, Upload, Server } from 'lucide-react';
+import { ChevronLeft } from 'lucide-react';
 import {
   GEMINI_PROVIDER_ID,
   type AppSettings,
@@ -9,7 +9,6 @@ import {
 } from '@/types';
 import { useI18n } from '@/contexts/I18nContext';
 import {
-  createConnectionFromTemplate,
   createConnectionId,
   createDefaultThirdPartyApiSettings,
   addThirdPartyConnection,
@@ -18,22 +17,13 @@ import {
   reorderThirdPartyConnections,
 } from '@/utils/thirdPartyApiProviders';
 import { probeThirdPartyConnection, formatLatency } from '@/utils/thirdPartyDiagnostics';
-import {
-  exportProvidersBackupFile,
-  parseProvidersBackupText,
-  applyImportedProviders,
-  type ImportMode,
-} from '@/utils/thirdPartyBackup';
-import { toastError, toastSuccess, toastWarning } from '@/stores/toastStore';
-import { interpolate } from '@/i18n/interpolate';
+import { toastError, toastSuccess } from '@/stores/toastStore';
 import { ProviderList } from './ProviderList';
 import { ProviderDetail } from './ProviderDetail';
 import { ProviderAddModal } from './ProviderAddModal';
-import { ApiConfigSection } from '@/components/settings/sections/ApiConfigSection';
-import {
-  ThirdPartyBackupDialog,
-  type ThirdPartyBackupDialogMode,
-} from '@/components/settings/sections/api-config/ThirdPartyBackupDialog';
+import { ProviderSetupWizardModal } from './ProviderSetupWizardModal';
+import { GeminiProviderDetail } from './GeminiProviderDetail';
+import { useProviderUiStore } from '@/stores/providerUiStore';
 
 interface ProviderSettingsSectionProps {
   settings: AppSettings;
@@ -52,15 +42,12 @@ export const ProviderSettingsSection: React.FC<ProviderSettingsSectionProps> = (
   const currentSettings = settings.thirdPartyApi ?? createDefaultThirdPartyApiSettings();
   const connections = useMemo(() => currentSettings.connections ?? [], [currentSettings.connections]);
 
-  const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(() => {
-    return initialSelectedId || connections[0]?.id || GEMINI_PROVIDER_ID;
-  });
+  const storedSelectedConnectionId = useProviderUiStore((s) => s.selectedConnectionId);
+  const setSelectedConnectionId = useProviderUiStore((s) => s.setSelectedConnectionId);
+  const [isMobileDetailOpen, setIsMobileDetailOpen] = useState(true);
 
   const [isAddOpen, setIsAddOpen] = useState(false);
-  const [isBackupOpen, setIsBackupOpen] = useState(false);
-  const [backupDialogMode, setBackupDialogMode] = useState<ThirdPartyBackupDialogMode>('export');
-  const [pendingImportedConnections, setPendingImportedConnections] = useState<ThirdPartyConnection[]>([]);
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [wizardTemplateId, setWizardTemplateId] = useState<ThirdPartyTemplateId | null>(null);
 
   const geminiStatus = useMemo(() => {
     const hasKey = Boolean(settings.apiKey?.trim() || settings.serverManagedApi);
@@ -70,17 +57,27 @@ export const ProviderSettingsSection: React.FC<ProviderSettingsSectionProps> = (
     };
   }, [settings.apiKey, settings.serverManagedApi, settings.useApiProxy, settings.apiProxyUrl]);
 
-  // Auto-select first connection or Gemini if selectedId becomes invalid
-  React.useEffect(() => {
-    if (selectedConnectionId === GEMINI_PROVIDER_ID) return;
-    if (connections.length > 0) {
-      if (!selectedConnectionId || !connections.some((c) => c.id === selectedConnectionId)) {
-        setSelectedConnectionId(connections[0].id);
-      }
-    } else {
-      setSelectedConnectionId(GEMINI_PROVIDER_ID);
+  const selectedConnectionId = useMemo(() => {
+    if (initialSelectedId) return initialSelectedId;
+    if (storedSelectedConnectionId === GEMINI_PROVIDER_ID) return GEMINI_PROVIDER_ID;
+    if (storedSelectedConnectionId && connections.some((c) => c.id === storedSelectedConnectionId)) {
+      return storedSelectedConnectionId;
     }
-  }, [connections, selectedConnectionId]);
+    return connections[0]?.id || GEMINI_PROVIDER_ID;
+  }, [initialSelectedId, storedSelectedConnectionId, connections]);
+
+  React.useEffect(() => {
+    if (initialSelectedId) {
+      setSelectedConnectionId(initialSelectedId);
+      setIsMobileDetailOpen(true);
+    }
+  }, [initialSelectedId, setSelectedConnectionId]);
+
+  React.useEffect(() => {
+    if (selectedConnectionId !== storedSelectedConnectionId) {
+      setSelectedConnectionId(selectedConnectionId);
+    }
+  }, [selectedConnectionId, storedSelectedConnectionId, setSelectedConnectionId]);
 
   const isGeminiSelected = selectedConnectionId === GEMINI_PROVIDER_ID;
 
@@ -93,12 +90,41 @@ export const ProviderSettingsSection: React.FC<ProviderSettingsSectionProps> = (
     [connections, selectedConnectionId],
   );
 
+  const isDetailVisibleOnMobile = isMobileDetailOpen && (Boolean(selectedConnection) || isGeminiSelected);
+
+  const handleSelectConnection = (id: string) => {
+    setSelectedConnectionId(id);
+    setIsMobileDetailOpen(true);
+  };
+
+  const handleBackToListOnMobile = () => {
+    setIsMobileDetailOpen(false);
+  };
+
   const handleAddTemplate = (templateId: ThirdPartyTemplateId) => {
-    const connection = createConnectionFromTemplate(templateId, connections, createConnectionId());
-    updateThirdPartyApi(addThirdPartyConnection(currentSettings, connection));
-    setSelectedConnectionId(connection.id);
     setIsAddOpen(false);
-    toastSuccess(t('thirdPartyProviderAdded', { name: connection.name }));
+    setWizardTemplateId(templateId);
+  };
+
+  const handleCompleteWizard = (configuredConnection: ThirdPartyConnection) => {
+    updateThirdPartyApi(addThirdPartyConnection(currentSettings, configuredConnection));
+    setSelectedConnectionId(configuredConnection.id);
+    setIsMobileDetailOpen(true);
+    setWizardTemplateId(null);
+    toastSuccess(
+      t('thirdPartyWizardConfiguredSuccess', {
+        name: configuredConnection.name,
+        count: configuredConnection.models.filter((m) => m.visibleInSelector !== false).length,
+      }),
+    );
+  };
+
+  const handleSkipWizard = (draftConnection: ThirdPartyConnection) => {
+    updateThirdPartyApi(addThirdPartyConnection(currentSettings, draftConnection));
+    setSelectedConnectionId(draftConnection.id);
+    setIsMobileDetailOpen(true);
+    setWizardTemplateId(null);
+    toastSuccess(t('thirdPartyProviderAdded', { name: draftConnection.name }));
   };
 
   const handleDuplicate = (conn: ThirdPartyConnection) => {
@@ -109,6 +135,7 @@ export const ProviderSettingsSection: React.FC<ProviderSettingsSectionProps> = (
     };
     updateThirdPartyApi(addThirdPartyConnection(currentSettings, duplicated));
     setSelectedConnectionId(duplicated.id);
+    setIsMobileDetailOpen(true);
     toastSuccess(t('thirdPartyCopyCreated', { name: duplicated.name }));
   };
 
@@ -117,8 +144,9 @@ export const ProviderSettingsSection: React.FC<ProviderSettingsSectionProps> = (
     updateThirdPartyApi(removeThirdPartyConnection(currentSettings, id));
     if (selectedConnectionId === id) {
       const remaining = connections.filter((c) => c.id !== id);
-      setSelectedConnectionId(remaining[0]?.id ?? null);
+      setSelectedConnectionId(remaining[0]?.id ?? GEMINI_PROVIDER_ID);
     }
+    useProviderUiStore.getState().cleanupConnectionUi(id);
     if (target) {
       toastSuccess(t('thirdPartyProviderRemoved', { name: target.name }));
     }
@@ -141,101 +169,21 @@ export const ProviderSettingsSection: React.FC<ProviderSettingsSectionProps> = (
     }
   };
 
-  // Export / Import
-  const handleExportClick = () => {
-    if (connections.length === 0) {
-      toastWarning(t('thirdPartyExportEmpty'));
-      return;
-    }
-    setBackupDialogMode('export');
-    setIsBackupOpen(true);
-  };
-
-  const handleFileSelected = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = (reader.result ?? e.target?.result) as string;
-      const parsed = parseProvidersBackupText(text);
-      if (parsed.validCount === 0) {
-        toastError(t('thirdPartyImportError'));
-        return;
-      }
-      if (connections.length === 0) {
-        const next = applyImportedProviders([], parsed.connections, 'overwrite');
-        updateThirdPartyApi({ ...currentSettings, connections: next });
-        toastSuccess(interpolate(t('thirdPartyImportSuccess'), { count: parsed.validCount }));
-        if (next.length > 0) setSelectedConnectionId(next[0].id);
-      } else {
-        setPendingImportedConnections(parsed.connections);
-        setBackupDialogMode('import-confirm');
-        setIsBackupOpen(true);
-      }
-    };
-    reader.readAsText(file);
-  };
-
-  const handleConfirmImport = (mode: ImportMode) => {
-    const next = applyImportedProviders(connections, pendingImportedConnections, mode);
-    updateThirdPartyApi({ ...currentSettings, connections: next });
-    toastSuccess(interpolate(t('thirdPartyImportSuccess'), { count: pendingImportedConnections.length }));
-  };
-
   return (
     <div
       data-settings-item="providers-root"
       className="flex flex-col h-full w-full bg-[var(--theme-bg-primary)] overflow-hidden"
     >
-      <input
-        type="file"
-        ref={fileInputRef}
-        accept=".json,application/json"
-        className="hidden"
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) {
-            handleFileSelected(file);
-            e.target.value = '';
-          }
-        }}
-      />
-      <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--theme-border-secondary)]/30 bg-[var(--theme-bg-secondary)]/40 text-xs flex-shrink-0">
-        <div className="flex items-center gap-2">
-          <Server size={14} className="text-[var(--theme-text-secondary)]" />
-          <span className="font-semibold text-[var(--theme-text-primary)]">{t('thirdPartyManagementTitle')}</span>
-          <span className="text-[var(--theme-text-secondary)]">({connections.length})</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-1 px-2 py-1 rounded-md text-[var(--theme-text-secondary)] hover:text-[var(--theme-text-primary)] hover:bg-[var(--theme-bg-tertiary)] transition-colors"
-            title={t('thirdPartyImportConfig')}
-          >
-            <Upload size={13} />
-            <span>{t('import')}</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleExportClick}
-            disabled={connections.length === 0}
-            className="flex items-center gap-1 px-2 py-1 rounded-md text-[var(--theme-text-secondary)] hover:text-[var(--theme-text-primary)] hover:bg-[var(--theme-bg-tertiary)] transition-colors disabled:opacity-40"
-            title={t('thirdPartyExportConfig')}
-          >
-            <Download size={13} />
-            <span>{t('export')}</span>
-          </button>
-        </div>
-      </div>
       <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">
         <div
           className={`w-full md:w-64 lg:w-72 h-full flex-shrink-0 ${
-            selectedConnection || isGeminiSelected ? 'hidden md:flex' : 'flex'
+            isDetailVisibleOnMobile ? 'hidden md:flex' : 'flex'
           }`}
         >
           <ProviderList
             connections={connections}
             selectedConnectionId={selectedConnectionId}
-            onSelectConnection={setSelectedConnectionId}
+            onSelectConnection={handleSelectConnection}
             onReorder={handleReorder}
             onAddConnection={() => setIsAddOpen(true)}
             onEditConnection={() => {}}
@@ -245,46 +193,31 @@ export const ProviderSettingsSection: React.FC<ProviderSettingsSectionProps> = (
             geminiStatus={geminiStatus}
           />
         </div>
-        <div
-          className={`flex-1 min-w-0 h-full flex flex-col ${
-            selectedConnection || isGeminiSelected ? 'flex' : 'hidden md:flex'
-          }`}
-        >
+        <div className={`flex-1 min-w-0 h-full flex flex-col ${isDetailVisibleOnMobile ? 'flex' : 'hidden md:flex'}`}>
           {isGeminiSelected ? (
             <div className="flex-1 flex flex-col h-full min-h-0">
               <div className="md:hidden p-2 border-b border-[var(--theme-border-secondary)]/30 flex-shrink-0">
                 <button
                   type="button"
-                  onClick={() => setSelectedConnectionId(null)}
+                  onClick={handleBackToListOnMobile}
                   className="flex items-center gap-1 text-xs text-[var(--theme-text-secondary)] hover:text-[var(--theme-text-primary)]"
                 >
                   <ChevronLeft size={14} />
                   <span>{t('thirdPartyBackToList')}</span>
                 </button>
               </div>
-              <div className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 max-w-3xl w-full mx-auto">
-                <ApiConfigSection
-                  useCustomApiConfig={settings.useCustomApiConfig}
-                  setUseCustomApiConfig={(val) => onUpdateSettings({ useCustomApiConfig: val })}
-                  apiKey={settings.apiKey}
-                  setApiKey={(val) => onUpdateSettings({ apiKey: val })}
-                  apiProxyUrl={settings.apiProxyUrl}
-                  setApiProxyUrl={(val) => onUpdateSettings({ apiProxyUrl: val })}
-                  useApiProxy={settings.useApiProxy ?? false}
-                  setUseApiProxy={(val) => onUpdateSettings({ useApiProxy: val })}
-                  serverManagedApi={settings.serverManagedApi ?? false}
-                  settings={settings}
-                  onUpdate={(key, val) => onUpdateSettings({ [key]: val } as any)}
-                  hideProviderRedirect={true}
-                />
-              </div>
+              <GeminiProviderDetail
+                settings={settings}
+                onUpdateSettings={onUpdateSettings}
+                onCloseModal={onCloseModal}
+              />
             </div>
           ) : selectedConnection ? (
             <div className="flex-1 flex flex-col h-full min-h-0">
               <div className="md:hidden p-2 border-b border-[var(--theme-border-secondary)]/30 flex-shrink-0">
                 <button
                   type="button"
-                  onClick={() => setSelectedConnectionId(null)}
+                  onClick={handleBackToListOnMobile}
                   className="flex items-center gap-1 text-xs text-[var(--theme-text-secondary)] hover:text-[var(--theme-text-primary)]"
                 >
                   <ChevronLeft size={14} />
@@ -310,14 +243,13 @@ export const ProviderSettingsSection: React.FC<ProviderSettingsSectionProps> = (
         </div>
       </div>
       <ProviderAddModal isOpen={isAddOpen} onClose={() => setIsAddOpen(false)} onSelectTemplate={handleAddTemplate} />
-      <ThirdPartyBackupDialog
-        isOpen={isBackupOpen}
-        onClose={() => setIsBackupOpen(false)}
-        dialogMode={backupDialogMode}
-        connectionsCount={connections.length}
-        importedConnections={pendingImportedConnections}
-        onConfirmExport={(includeApiKeys) => exportProvidersBackupFile(connections, { includeApiKeys })}
-        onConfirmImport={handleConfirmImport}
+      <ProviderSetupWizardModal
+        isOpen={wizardTemplateId !== null}
+        onClose={() => setWizardTemplateId(null)}
+        templateId={wizardTemplateId}
+        existingConnections={connections}
+        onComplete={handleCompleteWizard}
+        onSkip={handleSkipWizard}
       />
     </div>
   );

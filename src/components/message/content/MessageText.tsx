@@ -85,35 +85,99 @@ export const MessageText: React.FC<MessageTextProps> = ({
           },
     [rawThinkingExtraction.content, message.role],
   );
-  const hasMediaInSession = useMemo(() => {
-    if (message.role !== 'model') return false;
-    if (
-      locateExtraction.videoLocates.length > 0 ||
-      locateExtraction.audioLocates.length > 0 ||
-      locateExtraction.pdfLocates.length > 0 ||
-      locateExtraction.imageLocates.length > 0
-    ) {
-      return true;
+  // LA mode must match the header button, which tracks the ACTIVE session's
+  // systemInstruction (currentChatSettings), not the global default. The
+  // message list only renders the active session's messages, so reading the
+  // same session setting here keeps the renderer and button consistent —
+  // otherwise a global LA prompt could mislabel a ```json block in a session
+  // that has its own custom system prompt (or miss a session that enabled LA
+  // locally). The LA prompt mode/overrides stay app-level (they are not
+  // per-session fields).
+  // Select narrowly (savedSessions + activeSessionId only): activeMessages
+  // changes on every streaming chunk, and subscribing to it would defeat
+  // React.memo on sibling message bubbles. Two primitive selectors so the
+  // object identity is stable across unrelated store updates.
+  const savedSessions = useChatStore((state) => state.savedSessions);
+  const activeSessionId = useChatStore((state) => state.activeSessionId);
+  const activeSession = useMemo(
+    () => savedSessions.find((session) => session.id === activeSessionId),
+    [activeSessionId, savedSessions],
+  );
+  const currentChatSettingsSystemInstruction = useMemo(() => {
+    return activeSession?.settings.systemInstruction ?? appSettings.systemInstruction;
+  }, [activeSession, appSettings.systemInstruction]);
+  const liveArtifactsMode = useMemo(
+    () =>
+      isLiveArtifactsModeFromSettings({
+        isLiveArtifactsEnabled: activeSession?.settings.isLiveArtifactsEnabled ?? appSettings.isLiveArtifactsEnabled,
+        isVisualFormattingActive:
+          activeSession?.settings.isVisualFormattingActive ?? appSettings.isVisualFormattingActive,
+        systemInstruction: currentChatSettingsSystemInstruction,
+        promptMode: appSettings.liveArtifactsPromptMode,
+        liveArtifactsSystemPrompt: appSettings.liveArtifactsSystemPrompt,
+        liveArtifactsSystemPrompts: appSettings.liveArtifactsSystemPrompts,
+      }),
+    [
+      activeSession?.settings.isLiveArtifactsEnabled,
+      activeSession?.settings.isVisualFormattingActive,
+      appSettings.isLiveArtifactsEnabled,
+      appSettings.isVisualFormattingActive,
+      appSettings.liveArtifactsPromptMode,
+      appSettings.liveArtifactsSystemPrompt,
+      appSettings.liveArtifactsSystemPrompts,
+      currentChatSettingsSystemInstruction,
+    ],
+  );
+
+  const { hasNavigableVideoOrAudio, hasPdfInSession, hasImageInSession } = useMemo(() => {
+    // Live Artifacts must NEVER execute locate conversions or timestamp link rewrites.
+    if (message.role !== 'model' || liveArtifactsMode) {
+      return { hasNavigableVideoOrAudio: false, hasPdfInSession: false, hasImageInSession: false };
     }
+    const hasVideoOrAudioLocate = locateExtraction.videoLocates.length > 0 || locateExtraction.audioLocates.length > 0;
+    const hasPdfLocate = locateExtraction.pdfLocates.length > 0;
+    const hasImageLocate = locateExtraction.imageLocates.length > 0;
+
     const { selectedFiles, activeMessages } = useChatStore.getState();
     const { videos, audios, pdfs, images } = collectSessionMediaFiles(selectedFiles, activeMessages);
-    return videos.length > 0 || audios.length > 0 || pdfs.length > 0 || images.length > 0;
+
+    return {
+      hasNavigableVideoOrAudio: hasVideoOrAudioLocate || videos.length > 0 || audios.length > 0,
+      hasPdfInSession: hasPdfLocate || pdfs.length > 0,
+      hasImageInSession: hasImageLocate || images.length > 0,
+    };
   }, [
-    locateExtraction.videoLocates.length,
+    liveArtifactsMode,
     locateExtraction.audioLocates.length,
-    locateExtraction.pdfLocates.length,
     locateExtraction.imageLocates.length,
+    locateExtraction.pdfLocates.length,
+    locateExtraction.videoLocates.length,
     message.role,
   ]);
 
   const effectiveContent = useMemo(() => {
-    if (!hasMediaInSession) {
+    if (liveArtifactsMode || (!hasNavigableVideoOrAudio && !hasPdfInSession && !hasImageInSession)) {
       return locateExtraction.cleanContent;
     }
-    const withPdfLinks = linkifyPdfLocates(rawThinkingExtraction.content);
-    const withImageLinks = linkifyImageLocates(withPdfLinks);
-    return linkifyTimestamps(withImageLinks);
-  }, [hasMediaInSession, locateExtraction.cleanContent, rawThinkingExtraction.content]);
+    let result = rawThinkingExtraction.content;
+    if (hasPdfInSession) {
+      result = linkifyPdfLocates(result);
+    }
+    if (hasImageInSession) {
+      result = linkifyImageLocates(result);
+    }
+    if (hasNavigableVideoOrAudio) {
+      result = linkifyTimestamps(result);
+    }
+    return result;
+  }, [
+    hasImageInSession,
+    hasNavigableVideoOrAudio,
+    hasPdfInSession,
+    liveArtifactsMode,
+    locateExtraction.cleanContent,
+    rawThinkingExtraction.content,
+  ]);
   const effectiveThoughts = useMemo(
     () => [thoughts, streamThoughts, rawThinkingExtraction.thoughts].filter(Boolean).join('\n\n'),
     [thoughts, streamThoughts, rawThinkingExtraction.thoughts],
@@ -121,6 +185,7 @@ export const MessageText: React.FC<MessageTextProps> = ({
 
   const shouldSmooth = isLoading && message.role === 'model';
   const displayedContent = useSmoothStreaming(effectiveContent, shouldSmooth);
+
   const markdownContent = useMemo(
     () =>
       normalizePreviewableMarkdownContent(displayedContent, {
@@ -151,45 +216,6 @@ export const MessageText: React.FC<MessageTextProps> = ({
   const liveArtifactFontSize = useMemo(
     () => resolveLiveArtifactsFontSize({ liveArtifactsCustomFontSize }),
     [liveArtifactsCustomFontSize],
-  );
-  // LA mode must match the header button, which tracks the ACTIVE session's
-  // systemInstruction (currentChatSettings), not the global default. The
-  // message list only renders the active session's messages, so reading the
-  // same session setting here keeps the renderer and button consistent —
-  // otherwise a global LA prompt could mislabel a ```json block in a session
-  // that has its own custom system prompt (or miss a session that enabled LA
-  // locally). The LA prompt mode/overrides stay app-level (they are not
-  // per-session fields).
-  // Select narrowly (savedSessions + activeSessionId only): activeMessages
-  // changes on every streaming chunk, and subscribing to it would defeat
-  // React.memo on sibling message bubbles. Two primitive selectors so the
-  // object identity is stable across unrelated store updates.
-  const savedSessions = useChatStore((state) => state.savedSessions);
-  const activeSessionId = useChatStore((state) => state.activeSessionId);
-  const activeSession = useMemo(
-    () => savedSessions.find((session) => session.id === activeSessionId),
-    [activeSessionId, savedSessions],
-  );
-  const currentChatSettingsSystemInstruction = useMemo(() => {
-    return activeSession?.settings.systemInstruction ?? appSettings.systemInstruction;
-  }, [activeSession, appSettings.systemInstruction]);
-  const liveArtifactsMode = useMemo(
-    () =>
-      isLiveArtifactsModeFromSettings({
-        isLiveArtifactsEnabled: activeSession?.settings.isLiveArtifactsEnabled ?? appSettings.isLiveArtifactsEnabled,
-        systemInstruction: currentChatSettingsSystemInstruction,
-        promptMode: appSettings.liveArtifactsPromptMode,
-        liveArtifactsSystemPrompt: appSettings.liveArtifactsSystemPrompt,
-        liveArtifactsSystemPrompts: appSettings.liveArtifactsSystemPrompts,
-      }),
-    [
-      activeSession?.settings.isLiveArtifactsEnabled,
-      appSettings.isLiveArtifactsEnabled,
-      appSettings.liveArtifactsPromptMode,
-      appSettings.liveArtifactsSystemPrompt,
-      appSettings.liveArtifactsSystemPrompts,
-      currentChatSettingsSystemInstruction,
-    ],
   );
 
   const prevIsLoadingRef = useRef(isLoading);

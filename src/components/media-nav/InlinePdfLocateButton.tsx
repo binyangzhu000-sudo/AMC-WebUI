@@ -1,12 +1,14 @@
 import React, { useCallback } from 'react';
 import { MapPin } from 'lucide-react';
 import { useI18n } from '@/contexts/I18nContext';
+import { interpolate } from '@/i18n/interpolate';
 import { seekSessionPdf } from '@/utils/media-nav/seekPdf';
 import { extractTextFromNode } from '@/utils/reactNodeText';
 import { useMediaNavStore } from '@/stores/mediaNavStore';
 import { useChatStore } from '@/stores/chatStore';
 import { collectSessionMediaFiles, resolveNamedFile } from '@/utils/media-nav/sessionMediaFiles';
 import { Tooltip } from '@/components/shared/Tooltip';
+import { focusChatInput } from '@/utils/chat-input/focus';
 
 interface InlinePdfLocateButtonProps {
   pageNumber: number;
@@ -59,6 +61,11 @@ export const InlinePdfLocateButton: React.FC<InlinePdfLocateButtonProps> = ({
 
   const isActive = Boolean(isOpen && openKind === 'pdf' && currentPage === pageNumber && activePdfMatches);
 
+  const handleMouseDown = (e: React.MouseEvent) => {
+    // Prevent button from stealing focus from the chat input
+    e.preventDefault();
+  };
+
   const handleClick = (e: React.MouseEvent) => {
     // If user is selecting text (e.g. dragging mouse or double-clicking to copy),
     // prevent accidental panel opening.
@@ -77,6 +84,7 @@ export const InlinePdfLocateButton: React.FC<InlinePdfLocateButtonProps> = ({
       snippet,
       messageId,
     });
+    focusChatInput(0, { caret: 'end', retries: 4 });
   };
 
   const labelText = extractTextFromNode(children);
@@ -86,7 +94,7 @@ export const InlinePdfLocateButton: React.FC<InlinePdfLocateButtonProps> = ({
     <div className="flex flex-col gap-1 max-w-[220px] text-xs select-none">
       <div className="flex items-center gap-1.5 font-semibold text-[var(--theme-text-primary)]">
         <span className="w-1.5 h-1.5 rounded-full bg-red-500 flex-shrink-0" />
-        <span>第 {pageNumber} 页</span>
+        <span>{interpolate(t('pdfNavPageLabel'), { page: pageNumber })}</span>
         {docName && (
           <span className="text-[10px] text-[var(--theme-text-tertiary)] truncate font-normal">({docName})</span>
         )}
@@ -109,10 +117,10 @@ export const InlinePdfLocateButton: React.FC<InlinePdfLocateButtonProps> = ({
               }}
             />
           </div>
-          <span className="text-[10px] text-[var(--theme-text-tertiary)] opacity-80">区域定位 · 点击展开</span>
+          <span className="text-[10px] text-[var(--theme-text-tertiary)] opacity-80">{t('pdfNavRegionLocate')}</span>
         </div>
       )}
-      {!box2d && <div className="text-[10px] text-[var(--theme-text-tertiary)] opacity-80 mt-0.5">点击跳转阅读</div>}
+      {!box2d && <div className="text-[10px] text-[var(--theme-text-tertiary)] opacity-80 mt-0.5">{t('pdfNavClickToJump')}</div>}
     </div>
   );
 
@@ -120,6 +128,7 @@ export const InlinePdfLocateButton: React.FC<InlinePdfLocateButtonProps> = ({
     <Tooltip text={tooltipPreview} side="top" align="center" asChild delayDuration={300}>
       <button
         type="button"
+        onMouseDown={handleMouseDown}
         onClick={handleClick}
         className={`inline-flex items-center gap-1 px-1.5 py-0.5 -my-0.5 mx-0.5 rounded-[5px] text-[0.82em] active:scale-[0.97] transition-all cursor-pointer align-baseline ${
           isActive

@@ -4,6 +4,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setupStoreStateReset } from '@/test/stores/reset';
 import { createThirdPartyConnection } from '@/test/data/factories';
 import * as modelHealthCheck from '@/utils/model/modelHealthCheck';
+import * as anthropicApi from '@/services/api/anthropicApi';
+import * as openaiCompatibleApi from '@/services/api/openaiCompatibleApi';
+import * as openaiResponsesApi from '@/services/api/openaiResponsesApi';
+import { useProviderUiStore } from '@/stores/providerUiStore';
 import { ProviderDetail } from './ProviderDetail';
 
 describe('ProviderDetail', () => {
@@ -355,5 +359,165 @@ describe('ProviderDetail', () => {
       [expect.objectContaining({ id: 'deepseek-chat' })],
       expect.anything(),
     );
+  });
+
+  describe('sync models dispatches on protocol', () => {
+    const clickSyncModels = async () => {
+      const syncBtn = Array.from(renderer.container.querySelectorAll('button')).find((btn) =>
+        btn.textContent?.includes('同步模型'),
+      );
+      expect(syncBtn).toBeDefined();
+      await act(async () => {
+        syncBtn?.click();
+      });
+    };
+
+    it('uses the Anthropic /v1/models fetcher for anthropic connections', async () => {
+      const anthropicFetch = vi
+        .spyOn(anthropicApi, 'fetchAnthropicModels')
+        .mockResolvedValue([{ id: 'claude-sonnet-5', name: 'claude-sonnet-5' }]);
+      const compatibleFetch = vi.spyOn(openaiCompatibleApi, 'fetchOpenAICompatibleModels');
+
+      act(() => {
+        renderer.root.render(
+          <ProviderDetail
+            connection={createThirdPartyConnection({
+              id: 'conn-anthropic',
+              templateId: 'anthropic',
+              protocol: 'anthropic',
+              baseUrl: 'https://api.anthropic.com',
+              apiKey: 'sk-ant',
+              modelId: 'claude-sonnet-5',
+              models: [{ id: 'claude-sonnet-5', name: 'Claude Sonnet 5' }],
+            })}
+            onUpdateConnection={vi.fn()}
+            onDeleteConnection={vi.fn()}
+          />,
+        );
+      });
+
+      await clickSyncModels();
+
+      expect(anthropicFetch).toHaveBeenCalledTimes(1);
+      expect(compatibleFetch).not.toHaveBeenCalled();
+    });
+
+    it('uses the Responses fetcher for openai-responses connections', async () => {
+      const responsesFetch = vi
+        .spyOn(openaiResponsesApi, 'fetchOpenAIResponsesModels')
+        .mockResolvedValue([{ id: 'gpt-5.6-sol', name: 'gpt-5.6-sol' }]);
+      const compatibleFetch = vi.spyOn(openaiCompatibleApi, 'fetchOpenAICompatibleModels');
+
+      act(() => {
+        renderer.root.render(
+          <ProviderDetail
+            connection={createThirdPartyConnection({
+              id: 'conn-responses',
+              templateId: 'openai',
+              protocol: 'openai-responses',
+              baseUrl: 'https://api.openai.com/v1',
+              apiKey: 'sk-openai',
+            })}
+            onUpdateConnection={vi.fn()}
+            onDeleteConnection={vi.fn()}
+          />,
+        );
+      });
+
+      await clickSyncModels();
+
+      expect(responsesFetch).toHaveBeenCalledTimes(1);
+      expect(compatibleFetch).not.toHaveBeenCalled();
+    });
+
+    it('persists and restores groupsCollapsed state in providerUiStore', () => {
+      // Pre-collapse group "deepseek" in providerUiStore
+      useProviderUiStore.getState().setGroupCollapsed('conn-deepseek', 'deepseek', true);
+
+      act(() => {
+        renderer.root.render(
+          <ProviderDetail connection={baseConnection} onUpdateConnection={vi.fn()} onDeleteConnection={vi.fn()} />,
+        );
+      });
+
+      // Since deepseek group is collapsed, the models inside (DeepSeek V3, DeepSeek R1) should not be rendered
+      expect(renderer.container.textContent).toContain('deepseek');
+      expect(renderer.container.textContent).not.toContain('DeepSeek V3');
+
+      // Click group toggle button to expand
+      const groupBtn = Array.from(renderer.container.querySelectorAll('button')).find((b) =>
+        b.textContent?.includes('deepseek'),
+      );
+      expect(groupBtn).toBeDefined();
+
+      act(() => {
+        groupBtn?.click();
+      });
+
+      expect(useProviderUiStore.getState().groupsCollapsedByConnection['conn-deepseek']?.['deepseek']).toBe(false);
+      expect(renderer.container.textContent).toContain('DeepSeek V3');
+    });
+
+    it('restores persisted model probe results on render', () => {
+      // Pre-populate probe results in store
+      useProviderUiStore.getState().setModelProbeResult('conn-deepseek', 'deepseek-chat', {
+        connectionId: 'conn-deepseek',
+        status: 'success',
+        latencyMs: 142,
+        modelId: 'deepseek-chat',
+        timestamp: Date.now(),
+        grade: 'fast',
+      });
+
+      act(() => {
+        renderer.root.render(
+          <ProviderDetail connection={baseConnection} onUpdateConnection={vi.fn()} onDeleteConnection={vi.fn()} />,
+        );
+      });
+
+      expect(renderer.container.textContent).toContain('142ms');
+    });
+
+    it('filters models by capability tabs and displays Free/Thinking badges', () => {
+      const connWithMultiCaps = createThirdPartyConnection({
+        id: 'conn-caps',
+        name: 'Multi Capability Provider',
+        baseUrl: 'https://api.example.com',
+        apiKey: 'sk-test',
+        models: [
+          { id: 'chat-model', name: 'Chat Standard', visibleInSelector: true },
+          { id: 'deepseek-r1', name: 'DeepSeek R1', visibleInSelector: true },
+          { id: 'meta-llama/llama-3-8b:free', name: 'Llama 3 Free', visibleInSelector: true },
+          { id: 'dall-e-3', name: 'DALL-E 3', visibleInSelector: true },
+        ],
+        enabled: true,
+      });
+
+      act(() => {
+        renderer.root.render(
+          <ProviderDetail connection={connWithMultiCaps} onUpdateConnection={vi.fn()} onDeleteConnection={vi.fn()} />,
+        );
+      });
+
+      // Check badges exist
+      expect(renderer.container.textContent).toMatch(/Thinking|思考/);
+      expect(renderer.container.textContent).toMatch(/Free|免费/);
+      expect(renderer.container.textContent).toMatch(/Image|生图/);
+
+      // Check capability filter buttons exist
+      const buttons = Array.from(renderer.container.querySelectorAll('button'));
+      const freeTabBtn = buttons.find((b) => b.textContent?.includes('免费'));
+      expect(freeTabBtn).toBeDefined();
+
+      // Click Free filter tab
+      act(() => {
+        freeTabBtn?.click();
+      });
+
+      // After filtering by Free, only Llama 3 Free should be displayed
+      expect(renderer.container.textContent).toContain('Llama 3 Free');
+      expect(renderer.container.textContent).not.toContain('Chat Standard');
+      expect(renderer.container.textContent).not.toContain('DALL-E 3');
+    });
   });
 });

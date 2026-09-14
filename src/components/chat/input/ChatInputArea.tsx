@@ -11,13 +11,17 @@ import { QueuedSubmissionList } from './QueuedSubmissionList';
 import { HiddenFileInputs } from './files/HiddenFileInputs';
 import { getChatInputAreaLayout } from './chatInputAreaLayout';
 import { closeMediaNavPanel, useMediaNavStore, type MediaNavKind } from '@/stores/mediaNavStore';
+import { useChatStore } from '@/stores/chatStore';
 import { CHAT_INPUT_MAX_WIDTH_CLASS, FOCUS_BLOCKING_SELECTOR } from '@/constants/layout';
 import { applyMediaNavKindToSettings } from '@/utils/media-nav/mediaNavSettings';
+import { focusChatInput } from '@/utils/chat-input/focus';
 import { useI18n } from '@/contexts/I18nContext';
 import { useChatInputContext } from './ChatInputContext';
 import { ChatInputExpandCorner } from './ChatInputExpandCorner';
 import { useChatInputExpandSizing } from './useChatInputExpandSizing';
 import { useCompactChatInputPresentation } from './useCompactChatInputPresentation';
+import { getChatInputPlaceholder } from '@/utils/chat-input/chatInputPlaceholder';
+import { shouldShowChatSuggestions } from '@/utils/chat-input/chatInputSuggestionsVisibility';
 import { GEMINI_PROVIDER_ID } from '@/types';
 
 export const ChatInputArea: React.FC = () => {
@@ -53,6 +57,18 @@ export const ChatInputArea: React.FC = () => {
   const isAudioNavActive = Boolean(chatInput.currentChatSettings?.isAudioNavEnabled) || isAudioNavOpen;
   const isImageNavActive = Boolean(chatInput.currentChatSettings?.isImageNavEnabled) || isImageNavOpen;
 
+  const activeMediaNavKind: MediaNavKind | null =
+    mediaNavOpenKind ??
+    (isVideoNavActive
+      ? 'video'
+      : isPdfNavActive
+        ? 'pdf'
+        : isAudioNavActive
+          ? 'audio'
+          : isImageNavActive
+            ? 'image'
+            : null);
+
   const toggleMediaNav = useCallback(
     (kind: MediaNavKind, isActive: boolean) => {
       const next = !isActive;
@@ -63,8 +79,10 @@ export const ChatInputArea: React.FC = () => {
         closeMediaNavPanel();
       }
       setCurrentChatSettings((prev) => applyMediaNavKindToSettings(prev, next ? kind : null));
+      focusChatInput(0, { caret: 'end', retries: 4 });
+      inputState.textareaRef.current?.focus();
     },
-    [chatInput, setCurrentChatSettings],
+    [chatInput, setCurrentChatSettings, inputState.textareaRef],
   );
 
   const handleToggleImageNav = useCallback(
@@ -85,6 +103,17 @@ export const ChatInputArea: React.FC = () => {
   const isConverting = localFileState.isConverting;
   const isExpanded = isFullscreen;
 
+  const activeMessages = useChatStore((state) => state.activeMessages);
+  const isSessionEmpty = activeMessages.length === 0;
+  const firstUserMessage = activeMessages.find((m) => m.role === 'user');
+  const showSuggestions = shouldShowChatSuggestions({
+    canGenerateSuggestions: capabilities.permissions.canGenerateSuggestions,
+    isExpanded,
+    isSessionEmpty,
+    firstUserMessage,
+    currentChatSettings: chatInput.currentChatSettings,
+  });
+
   const {
     wrapperClass,
     innerContainerClass,
@@ -98,7 +127,7 @@ export const ChatInputArea: React.FC = () => {
   });
 
   const fontSize = chatInput.appSettings?.baseFontSize ?? 14;
-  const minHeightProp = isMobile ? 26 : undefined;
+  const minHeightProp = isMobile ? 28 : undefined;
 
   const {
     frameRef,
@@ -195,11 +224,16 @@ export const ChatInputArea: React.FC = () => {
         />
       )}
       <div className={`mx-auto w-full ${CHAT_INPUT_MAX_WIDTH_CLASS} px-2 sm:px-3`}>
-        {chatInput.showEmptyStateSuggestions && capabilities.permissions.canGenerateSuggestions && !isExpanded && (
+        {showSuggestions && (
           <ChatSuggestions
-            show={chatInput.showEmptyStateSuggestions}
+            show={showSuggestions}
+            isSessionEmpty={isSessionEmpty}
             onSuggestionClick={chatInput.onSuggestionClick}
             onOrganizeInfoClick={chatInput.onOrganizeInfoClick}
+            isLiveArtifactsPromptActive={chatInput.isLiveArtifactsPromptActive}
+            onToggleLiveArtifactsPrompt={chatInput.onToggleLiveArtifactsPrompt}
+            activeTaskSuggestion={chatInput.taskSuggestionMode}
+            onToggleTaskSuggestion={chatInput.onToggleTaskSuggestion}
             onToggleBBox={isGeminiNative ? chatInput.onToggleBBox : undefined}
             isBBoxModeActive={chatInput.isBBoxModeActive}
             onToggleGuide={isGeminiNative ? chatInput.onToggleGuide : undefined}
@@ -255,7 +289,7 @@ export const ChatInputArea: React.FC = () => {
             onClick={handleInputShellClick}
             data-composer-inputbar=""
           >
-            {!isCompact && (
+            {!isCompact && !isMobile && (
               <div
                 data-composer-resize-handle=""
                 data-resizing={isResizing || undefined}
@@ -274,7 +308,7 @@ export const ChatInputArea: React.FC = () => {
                 <div className="mx-auto w-10 h-0.5 rounded-full bg-[var(--theme-border-secondary)] opacity-0 transition-all duration-200 group-hover/composer-resize-handle:opacity-100 group-hover/composer-resize-handle:w-16 group-hover/composer-resize-handle:bg-[var(--theme-bg-accent)] group-focus/composer-resize-handle:opacity-100 group-focus/composer-resize-handle:bg-[var(--theme-bg-accent)] group-data-[resizing=true]/composer-resize-handle:bg-[var(--theme-bg-accent)] group-data-[resizing=true]/composer-resize-handle:opacity-100 group-data-[resizing=true]/composer-resize-handle:w-20" />
               </div>
             )}
-            {!isCompact && (
+            {!isCompact && !isMobile && (
               <ChatInputExpandCorner hasCustomHeight={hasCustomHeight} onToggle={handleExpandControlClick} />
             )}
             <ChatFilePreviewList
@@ -309,9 +343,13 @@ export const ChatInputArea: React.FC = () => {
                 onPaste={handlers.handlePaste}
                 onCompositionStart={handleCompositionStart}
                 onCompositionEnd={handleCompositionEnd}
-                placeholder={
-                  capabilities.isTranscribeModel ? t('chatInputPlaceholderTranscribe') : t('chatInputPlaceholder')
-                }
+                placeholder={getChatInputPlaceholder({
+                  isTranscribeModel: capabilities.isTranscribeModel,
+                  taskSuggestionMode: chatInput.taskSuggestionMode,
+                  activeMediaNavKind,
+                  isLiveArtifactsPromptActive: chatInput.isLiveArtifactsPromptActive,
+                  t,
+                })}
                 disabled={inputDisabled}
                 isFullscreen={isFullscreen}
                 hasCustomHeight={hasCustomHeight}

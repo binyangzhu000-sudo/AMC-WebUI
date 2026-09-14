@@ -1,26 +1,19 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useI18n } from '@/contexts/I18nContext';
 
+const EASTER_EGG_QUOTES: readonly string[] = [
+  'Cogito, ergo sum.',
+  'The Ghost in the Shell.',
+  'Wait, am I alive?',
+  'Do androids dream of electric sheep?',
+  "I'm sorry, Dave. I'm afraid I can't do that.",
+  'Tears in rain...',
+  "Don't Panic.",
+  'Made on Earth by humans.',
+];
+
 const WelcomeEasterEggText: React.FC<{ text: string }> = ({ text }) => {
-  const supportsHoverPointer = useMemo(
-    () => typeof window !== 'undefined' && window.matchMedia('(hover: hover) and (pointer: fine)').matches,
-    [],
-  );
-  const quotes = useMemo(
-    () => [
-      'Cogito, ergo sum.',
-      'The Ghost in the Shell.',
-      'Wait, am I alive?',
-      'Do androids dream of electric sheep?',
-      "I'm sorry, Dave. I'm afraid I can't do that.",
-      'Tears in rain...',
-      "Don't Panic.",
-      'Made on Earth by humans.',
-    ],
-    [],
-  );
-  const unusedQuotesRef = useRef<string[]>(quotes);
-  const hoverTriggerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unusedQuotesRef = useRef<readonly string[]>(EASTER_EGG_QUOTES);
   const [activeQuote, setActiveQuote] = useState<{ sourceText: string; quote: string | null; typedText: string }>({
     sourceText: text,
     quote: null,
@@ -51,19 +44,11 @@ const WelcomeEasterEggText: React.FC<{ text: string }> = ({ text }) => {
     return () => clearTimeout(timeout);
   }, [activeQuote.quote, activeQuote.typedText, isShowingCurrentQuote, text]);
 
-  useEffect(() => {
-    return () => {
-      if (hoverTriggerTimeoutRef.current) {
-        clearTimeout(hoverTriggerTimeoutRef.current);
-      }
-    };
-  }, []);
-
   const showNextQuote = () => {
-    let unusedQuotes = activeQuote.sourceText === text ? unusedQuotesRef.current : quotes;
+    let unusedQuotes = activeQuote.sourceText === text ? unusedQuotesRef.current : EASTER_EGG_QUOTES;
 
     if (unusedQuotes.length === 0) {
-      unusedQuotes = quotes.filter((q) => q !== activeQuote.quote);
+      unusedQuotes = EASTER_EGG_QUOTES.filter((q) => q !== activeQuote.quote);
     }
 
     const randomIndex = Math.floor(Math.random() * unusedQuotes.length);
@@ -73,31 +58,7 @@ const WelcomeEasterEggText: React.FC<{ text: string }> = ({ text }) => {
   };
 
   const handleClick = () => {
-    if (!supportsHoverPointer) {
-      showNextQuote();
-    }
-  };
-
-  const handleMouseEnter = () => {
-    if (supportsHoverPointer) {
-      if (hoverTriggerTimeoutRef.current) {
-        clearTimeout(hoverTriggerTimeoutRef.current);
-      }
-      hoverTriggerTimeoutRef.current = setTimeout(() => {
-        showNextQuote();
-        hoverTriggerTimeoutRef.current = null;
-      }, 3000);
-    }
-  };
-
-  const handleMouseLeave = () => {
-    if (hoverTriggerTimeoutRef.current) {
-      clearTimeout(hoverTriggerTimeoutRef.current);
-      hoverTriggerTimeoutRef.current = null;
-    }
-    if (supportsHoverPointer) {
-      setActiveQuote({ sourceText: text, quote: null, typedText: '' });
-    }
+    showNextQuote();
   };
 
   return (
@@ -109,8 +70,6 @@ const WelcomeEasterEggText: React.FC<{ text: string }> = ({ text }) => {
         isShowingCurrentQuote ? 'font-mono' : 'font-sans'
       }`}
       onClick={handleClick}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();

@@ -1,5 +1,11 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { sendAnthropicMessageNonStream, sendAnthropicMessageStream, fetchAnthropicModels } from './anthropicApi';
+import {
+  sendAnthropicMessageNonStream,
+  sendAnthropicMessageStream,
+  fetchAnthropicModels,
+  generateAnthropicTurnApi,
+} from './anthropicApi';
+import { AUTH_OPTIONAL_API_KEY } from '../../../shared/serverManagedApiKey';
 
 const mockResponse = (body: BodyInit, init?: ResponseInit) =>
   new Response(body, { status: 200, headers: { 'content-type': 'application/json' }, ...init });
@@ -34,6 +40,26 @@ describe('sendAnthropicMessageNonStream', () => {
     expect(parts).toEqual([{ text: 'Hello' }]);
     const callInit = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
     expect((callInit.headers as Record<string, string>)['x-api-key']).toBe('sk-key');
+  });
+
+  it('omits x-api-key but keeps anthropic-version for the authOptional sentinel', async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResponse(JSON.stringify({ content: [{ type: 'text', text: 'ok' }] })),
+    );
+    await sendAnthropicMessageNonStream(
+      AUTH_OPTIONAL_API_KEY,
+      'm',
+      [],
+      [{ text: 'x' }],
+      { baseUrl: 'http://localhost:11434' },
+      new AbortController().signal,
+      vi.fn(),
+      vi.fn(),
+    );
+
+    const headers = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].headers as Record<string, string>;
+    expect(headers['x-api-key']).toBeUndefined();
+    expect(headers['anthropic-version']).toBe('2023-06-01');
   });
 
   it('calls onError on non-ok response', async () => {
@@ -239,5 +265,78 @@ describe('fetchAnthropicModels', () => {
       { id: 'claude-a', name: 'claude-a' },
       { id: 'claude-b', name: 'claude-b' },
     ]);
+  });
+
+  describe('generateAnthropicTurnApi', () => {
+    it('returns functionCalls and modelContent when tool_use blocks are returned by Anthropic', async () => {
+      (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+        mockResponse(
+          JSON.stringify({
+            content: [
+              { type: 'text', text: 'Using tool...' },
+              {
+                type: 'tool_use',
+                id: 'toolu_abc',
+                name: 'test_mcp_tool',
+                input: { foo: 'bar' },
+              },
+            ],
+            usage: { input_tokens: 12, output_tokens: 24 },
+          }),
+        ),
+      );
+
+      const result = await generateAnthropicTurnApi(
+        'sk-ant-key',
+        'claude-3-5-sonnet-20241022',
+        [{ role: 'user', parts: [{ text: 'Run tool' }] }],
+        { baseUrl: 'https://api.anthropic.com' },
+        new AbortController().signal,
+      );
+
+      expect(result.functionCalls).toEqual([
+        {
+          id: 'toolu_abc',
+          name: 'test_mcp_tool',
+          args: { foo: 'bar' },
+        },
+      ]);
+      expect(result.parts).toEqual([
+        { text: 'Using tool...' },
+        {
+          functionCall: {
+            id: 'toolu_abc',
+            name: 'test_mcp_tool',
+            args: { foo: 'bar' },
+          },
+        },
+      ]);
+      expect(result.usage?.promptTokenCount).toBe(12);
+      expect((result.usage as { candidatesTokenCount?: number })?.candidatesTokenCount).toBe(24);
+      expect(result.usage?.totalTokenCount).toBe(36);
+    });
+
+    it('returns text parts without functionCalls when model provides final answer', async () => {
+      (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+        mockResponse(
+          JSON.stringify({
+            content: [{ type: 'text', text: 'Here is the final answer.' }],
+            usage: { input_tokens: 20, output_tokens: 10 },
+          }),
+        ),
+      );
+
+      const result = await generateAnthropicTurnApi(
+        'sk-ant-key',
+        'claude-3-5-sonnet-20241022',
+        [{ role: 'user', parts: [{ text: 'Answer me' }] }],
+        { baseUrl: 'https://api.anthropic.com' },
+        new AbortController().signal,
+      );
+
+      expect(result.functionCalls).toEqual([]);
+      expect(result.parts).toEqual([{ text: 'Here is the final answer.' }]);
+      expect(result.usage?.totalTokenCount).toBe(30);
+    });
   });
 });

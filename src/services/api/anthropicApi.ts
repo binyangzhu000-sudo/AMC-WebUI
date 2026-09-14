@@ -1,5 +1,6 @@
-import type { UsageMetadata } from '@google/genai';
-import type { ModelOption, NonStreamMessageSender, StreamMessageSender } from '@/types';
+import type { FunctionCall, Part, UsageMetadata } from '@google/genai';
+import type { ChatHistoryItem, ModelOption, NonStreamMessageSender, StreamMessageSender } from '@/types';
+import { readResponseErrorMessage } from '@/utils/errorMessage';
 import { buildAnthropicRequestBody } from './anthropicMessages';
 import { extractAnthropicMessageText, extractAnthropicMessageThoughts } from './anthropicResponses';
 import { readAnthropicStreamEvents } from './anthropicStream';
@@ -10,6 +11,7 @@ import {
   type AnthropicStreamEvent,
 } from './anthropicTypes';
 import { buildAnthropicMessagesUrl, buildAnthropicModelsUrl } from './anthropicUrls';
+import { isAuthOptionalApiKey } from '../../../shared/serverManagedApiKey';
 import {
   createApiRequestInitFactory,
   executeNonStreamChatRequest,
@@ -20,7 +22,10 @@ import {
 const ANTHROPIC_VERSION = '2023-06-01';
 
 const anthropicAuthHeaders = (apiKey: string): Record<string, string> => ({
-  'x-api-key': apiKey,
+  // `anthropic-version` is a protocol header, not a credential, so it is always
+  // sent. The key header is omitted for the authOptional sentinel — otherwise
+  // the literal string "auth-optional" would be sent upstream as the key.
+  ...(isAuthOptionalApiKey(apiKey) ? {} : { 'x-api-key': apiKey }),
   'anthropic-version': ANTHROPIC_VERSION,
 });
 
@@ -139,4 +144,81 @@ export const sendAnthropicMessageStream: StreamMessageSender = async (
       return finalUsage;
     },
   });
+};
+
+export const generateAnthropicTurnApi = async (
+  apiKey: string,
+  modelId: string,
+  contents: ChatHistoryItem[],
+  config: unknown,
+  abortSignal: AbortSignal,
+  providerId?: string | null,
+) => {
+  const abortError = new Error('aborted');
+  abortError.name = 'AbortError';
+
+  if (abortSignal.aborted) {
+    throw abortError;
+  }
+
+  const anthropicConfig = asAnthropicChatConfig(config);
+  const url = buildAnthropicMessagesUrl(anthropicConfig.baseUrl);
+  const requestBody = buildAnthropicRequestBody(modelId, contents, [], anthropicConfig, 'user', false);
+  const requestInit = createRequestInit(
+    apiKey,
+    requestBody,
+    abortSignal,
+    providerId,
+    anthropicConfig.baseUrl,
+    anthropicConfig.extraHeaders,
+  );
+
+  const response = await fetch(url, requestInit);
+  if (!response.ok) {
+    throw new Error(await readResponseErrorMessage(response, 'Anthropic'));
+  }
+
+  if (abortSignal.aborted) {
+    throw abortError;
+  }
+
+  const payload = (await response.json()) as AnthropicResponsePayload;
+  const rawText = extractAnthropicMessageText(payload);
+  const thoughts = extractAnthropicMessageThoughts(payload);
+  const usage = mapAnthropicUsage(payload.usage);
+
+  const toolCalls: FunctionCall[] = (payload.content ?? [])
+    .filter((block) => block.type === 'tool_use')
+    .map((block) => ({
+      id: block.id || 'toolu_0',
+      name: block.name || '',
+      args: (block.input as Record<string, unknown>) ?? {},
+    }));
+
+  const parts: Part[] = [];
+  if (rawText) {
+    parts.push({ text: rawText });
+  }
+  for (const call of toolCalls) {
+    parts.push({
+      functionCall: call,
+    });
+  }
+
+  if (parts.length === 0 && !thoughts) {
+    throw new Error('The model returned an empty response.');
+  }
+
+  return {
+    modelContent: {
+      role: 'model' as const,
+      parts,
+    },
+    parts,
+    thoughts,
+    usage,
+    grounding: undefined,
+    urlContext: undefined,
+    functionCalls: toolCalls,
+  };
 };

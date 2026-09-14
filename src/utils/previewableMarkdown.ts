@@ -359,6 +359,339 @@ const extractArtifactSegment = (textContent: string, isStreaming: boolean): Arti
   return { html: doc, markupType: docType, suffix };
 };
 
+/**
+ * A model reply is often prose PLUS a bare artifact (`引导语 + <div …>`), not a
+ * single artifact. `extractArtifactSegment` only fires when the artifact is the
+ * whole message (optionally with trailing prose after a full `</html>`), so a
+ * fragment preceded by a sentence used to fall through to the Markdown
+ * renderer and surface as escaped source text in the bubble.
+ *
+ * This finds the outermost bare artifact region anywhere in the reply so the
+ * surrounding prose can be preserved verbatim. Three rules keep it safe:
+ *
+ * 1. Fenced regions are never considered. A fenced block is author intent —
+ *    either a real artifact fence or a deliberate source example — and must
+ *    not be re-wrapped or nested.
+ * 2. Only strong LA signals qualify: a complete HTML document/SVG, or a
+ *    `--amc-live-artifact-*` / `data-amc-*` marker. A marker-less bare fragment
+ *    stays as-is to match `shouldUnwrapMislabeledHtmlFence`, which cannot
+ *    distinguish "mislabeled LA" from "intentionally showing markup".
+ * 3. The artifact must be separated from the prose by a blank line. Inline
+ *    "prose + HTML" (`已为你生成：\n<section>…`) is deliberately rendered as
+ *    rich markdown in the message flow, not promoted into an artifact frame.
+ */
+const BARE_ARTIFACT_OPENER_REGEX = new RegExp(
+  `^(?:<!doctype\\s+html\\b[^>]*>|<html\\b|<(?:${HTML_FRAGMENT_TAG_NAMES})(?:\\s[^>]*)?>)`,
+  'i',
+);
+
+/** A region is only a candidate when a blank line precedes it. */
+const BLANK_LINE_BEFORE_REGEX = /\n[ \t]*\n[ \t]*$/;
+
+/** Offsets of every fenced code region, so bare-artifact scanning can skip them. */
+const getFencedRegionOffsets = (text: string): Array<{ start: number; end: number }> => {
+  const regions: Array<{ start: number; end: number }> = [];
+  const regex = new RegExp(FENCED_CODE_BLOCK_REGEX.source, 'g');
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    regions.push({ start: match.index, end: match.index + match[0].length });
+    if (match[0].length === 0) {
+      regex.lastIndex += 1;
+    }
+  }
+
+  // An unclosed fence opened at the end swallows the rest of the reply.
+  const openMatch = text.match(OPEN_FENCED_CODE_BLOCK_AT_END_REGEX);
+  if (openMatch && openMatch.index !== undefined) {
+    const alreadyCovered = regions.some(
+      (region) => openMatch.index !== undefined && openMatch.index >= region.start && openMatch.index < region.end,
+    );
+    if (!alreadyCovered) {
+      regions.push({ start: openMatch.index, end: text.length });
+    }
+  }
+
+  return regions;
+};
+
+const isInsideFencedRegion = (offset: number, regions: Array<{ start: number; end: number }>): boolean =>
+  regions.some((region) => offset >= region.start && offset < region.end);
+
+/**
+ * Does this bare region carry a strong enough signal to be promoted?
+ *
+ * A complete document/SVG is unambiguous. For fragments the bar is deliberately
+ * higher than `getPreviewMarkupType`: a bare `<div>…</div>` is very often a
+ * truncation boundary of a longer streaming fragment, or plain markup being
+ * shown on purpose. Only a Live Artifacts marker (protocol CSS variable or
+ * `data-amc-*`) proves the author meant an artifact — the same signal
+ * `shouldUnwrapMislabeledHtmlFence` relies on.
+ */
+const isPromotableBareArtifact = (artifact: string): boolean => {
+  const markupType = getPreviewMarkupType(artifact);
+  if (markupType === 'svg') {
+    return true;
+  }
+
+  if (markupType === 'html' && HTML_DOCUMENT_REGEX.test(artifact.trim())) {
+    return true;
+  }
+
+  return LIVE_ARTIFACT_MARKER_REGEX.test(artifact) && isStandaloneHtmlFragment(artifact);
+};
+
+const VOID_HTML_ELEMENTS = new Set([
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
+]);
+
+/**
+ * Parses balanced HTML tags starting at `startIndex` to find the exact end of an
+ * HTML fragment. When tag depth returns to 0 and is followed by prose (or EOF),
+ * this returns the offset immediately after the last closed element.
+ */
+const findHtmlFragmentEnd = (text: string, startIndex: number): number | null => {
+  const stack: string[] = [];
+  let i = startIndex;
+  let lastValidEnd: number | null = null;
+  const len = text.length;
+
+  while (i < len) {
+    if (stack.length === 0 && lastValidEnd !== null) {
+      let nextCharIndex = i;
+      while (nextCharIndex < len && /\s/.test(text[nextCharIndex])) {
+        nextCharIndex += 1;
+      }
+      if (nextCharIndex >= len) {
+        return lastValidEnd;
+      }
+      // If the next non-whitespace character does not start an HTML tag or comment, stop.
+      if (text[nextCharIndex] !== '<' || text.startsWith('```', nextCharIndex)) {
+        return lastValidEnd;
+      }
+      i = nextCharIndex;
+    }
+
+    if (text.startsWith('<!--', i)) {
+      const commentEnd = text.indexOf('-->', i + 4);
+      if (commentEnd === -1) {
+        break;
+      }
+      i = commentEnd + 3;
+      if (stack.length === 0) {
+        lastValidEnd = i;
+      }
+      continue;
+    }
+
+    const tagStartMatch = text.slice(i).match(/^<(\/)?([a-zA-Z][a-zA-Z0-9:-]*)/);
+    if (tagStartMatch) {
+      const isClosing = Boolean(tagStartMatch[1]);
+      const tagName = tagStartMatch[2].toLowerCase();
+
+      let tagEnd = -1;
+      let quote: string | null = null;
+      let j = i + 1;
+      while (j < len) {
+        const char = text[j];
+        if (quote) {
+          if (char === quote) {
+            quote = null;
+          }
+        } else if (char === '"' || char === "'") {
+          quote = char;
+        } else if (char === '>') {
+          tagEnd = j;
+          break;
+        }
+        j += 1;
+      }
+
+      if (tagEnd === -1) {
+        break;
+      }
+
+      const tagContent = text.slice(i + 1, tagEnd).trim();
+      const isSelfClosing = tagContent.endsWith('/');
+
+      if (tagName === 'script' || tagName === 'style') {
+        const closeTag = `</${tagName}>`;
+        const closeIdx = text.toLowerCase().indexOf(closeTag, tagEnd + 1);
+        if (closeIdx !== -1) {
+          i = closeIdx + closeTag.length;
+          if (stack.length === 0) {
+            lastValidEnd = i;
+          }
+          continue;
+        }
+      }
+
+      if (isClosing) {
+        if (stack.length > 0 && stack[stack.length - 1] === tagName) {
+          stack.pop();
+        } else {
+          const lastIdx = stack.lastIndexOf(tagName);
+          if (lastIdx !== -1) {
+            stack.length = lastIdx;
+          }
+        }
+      } else if (!isSelfClosing && !VOID_HTML_ELEMENTS.has(tagName)) {
+        stack.push(tagName);
+      }
+
+      if (stack.length === 0) {
+        lastValidEnd = tagEnd + 1;
+      }
+
+      i = tagEnd + 1;
+      continue;
+    }
+
+    if (stack.length === 0 && /\S/.test(text[i])) {
+      if (lastValidEnd !== null) {
+        return lastValidEnd;
+      }
+      return null;
+    }
+
+    i += 1;
+  }
+
+  if (stack.length === 0 && lastValidEnd !== null) {
+    return lastValidEnd;
+  }
+
+  return null;
+};
+
+const findBareArtifactRegion = (text: string): { start: number; end: number } | null => {
+  const lines = text.split('\n');
+  const fencedRegions = getFencedRegionOffsets(text);
+  // Absolute offset of each line so a matched region can be spliced back into
+  // the original string without re-normalizing the prose around it.
+  const lineOffsets: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineOffsets.push(offset);
+    offset += line.length + 1;
+  }
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const lineStart = lineOffsets[i];
+
+    if (isInsideFencedRegion(lineStart, fencedRegions)) {
+      continue;
+    }
+
+    if (!BARE_ARTIFACT_OPENER_REGEX.test(line.trimStart())) {
+      continue;
+    }
+
+    const leadingWhitespace = line.length - line.trimStart().length;
+    const candidateStart = lineStart + leadingWhitespace;
+
+    // Rule 3: the artifact must be set off from preceding prose by a blank line
+    // (or be the whole reply). Otherwise it is inline prose+HTML and stays as
+    // rich markdown in the message flow.
+    const precedingText = text.slice(0, candidateStart);
+    if (precedingText.trim() !== '' && !BLANK_LINE_BEFORE_REGEX.test(precedingText)) {
+      continue;
+    }
+
+    // Rule 1: a fence that opens after the candidate swallows everything that
+    // follows it, so nothing at or past that fence can be part of the artifact.
+    const followingFenceStart = fencedRegions
+      .filter((region) => region.start > candidateStart)
+      .reduce((min, region) => Math.min(min, region.start), Number.POSITIVE_INFINITY);
+
+    // 1. Try finding complete HTML document
+    const candidateText = text.slice(candidateStart);
+    if (/^(?:<!doctype\s+html\b[^>]*>\s*)?<html\b/i.test(candidateText)) {
+      const closeIndex = candidateText.toLowerCase().indexOf('</html>');
+      if (closeIndex !== -1) {
+        let end = candidateStart + closeIndex + '</html>'.length;
+        const trailingCommentMatch = text.slice(end).match(/^\s*(?:<!--[\s\S]*?-->\s*)*/);
+        if (trailingCommentMatch) {
+          end += trailingCommentMatch[0].trimEnd().length;
+        }
+        if (!Number.isFinite(followingFenceStart) || end <= followingFenceStart) {
+          const candidate = text.slice(candidateStart, end);
+          if (isPromotableBareArtifact(candidate)) {
+            return { start: candidateStart, end };
+          }
+        }
+      }
+    }
+
+    // 2. Try finding complete SVG
+    if (/^<svg\b/i.test(candidateText)) {
+      const closeIndex = candidateText.toLowerCase().indexOf('</svg>');
+      if (closeIndex !== -1) {
+        const end = candidateStart + closeIndex + '</svg>'.length;
+        if (!Number.isFinite(followingFenceStart) || end <= followingFenceStart) {
+          const candidate = text.slice(candidateStart, end);
+          if (isPromotableBareArtifact(candidate)) {
+            return { start: candidateStart, end };
+          }
+        }
+      }
+    }
+
+    // 3. Try finding HTML fragment via balanced tag parsing
+    const fragmentEnd = findHtmlFragmentEnd(text, candidateStart);
+    if (fragmentEnd !== null) {
+      if (!Number.isFinite(followingFenceStart) || fragmentEnd <= followingFenceStart) {
+        const candidate = text.slice(candidateStart, fragmentEnd);
+        if (isPromotableBareArtifact(candidate)) {
+          return { start: candidateStart, end: fragmentEnd };
+        }
+      }
+    }
+
+    // 4. Fallback line-by-line check (bounded by the first prose block after candidate)
+    let maxLineIdx = lines.length - 1;
+    for (let k = i + 1; k < lines.length; k += 1) {
+      const prevLine = lines[k - 1];
+      const curLine = lines[k];
+      if (prevLine.trim() === '' && curLine.trim() !== '' && !curLine.trimStart().startsWith('<')) {
+        maxLineIdx = k - 1;
+        break;
+      }
+    }
+
+    for (let j = maxLineIdx; j >= i; j -= 1) {
+      const end = j === lines.length - 1 ? text.length : lineOffsets[j + 1] - 1;
+      if (end <= candidateStart) {
+        continue;
+      }
+      if (Number.isFinite(followingFenceStart) && end > followingFenceStart) {
+        continue;
+      }
+
+      const candidate = text.slice(candidateStart, end);
+      if (isPromotableBareArtifact(candidate)) {
+        return { start: candidateStart, end };
+      }
+    }
+  }
+
+  return null;
+};
+
 const wrapBarePreviewableArtifact = (
   markdownContent: string,
   options: NormalizePreviewableMarkdownOptions = {},
@@ -371,14 +704,41 @@ const wrapBarePreviewableArtifact = (
 
   const segment = extractArtifactSegment(content, options.isStreaming ?? false);
 
-  if (!segment) {
-    return markdownContent;
+  if (segment) {
+    const artifactLanguage = segment.markupType === 'html' ? LIVE_ARTIFACT_HTML_LANGUAGE : segment.markupType;
+    const fence = `\`\`\`${artifactLanguage}\n${segment.html}\n\`\`\``;
+    const suffix = segment.suffix ? `\n\n${segment.suffix}` : '';
+    return `${fence}${suffix}`;
   }
 
-  const artifactLanguage = segment.markupType === 'html' ? LIVE_ARTIFACT_HTML_LANGUAGE : segment.markupType;
-  const fence = `\`\`\`${artifactLanguage}\n${segment.html}\n\`\`\``;
-  const suffix = segment.suffix ? `\n\n${segment.suffix}` : '';
-  return `${fence}${suffix}`;
+  // Prose-wrapped artifacts: loop to wrap ALL bare artifact regions in the content.
+  let remaining = content;
+  const parts: string[] = [];
+
+  while (remaining) {
+    const region = findBareArtifactRegion(remaining);
+    if (!region) {
+      parts.push(remaining);
+      break;
+    }
+
+    const artifact = remaining.slice(region.start, region.end).trim();
+    const markupType = getPreviewMarkupType(artifact);
+    if (!markupType) {
+      parts.push(remaining);
+      break;
+    }
+
+    const artifactLanguage = markupType === 'html' ? LIVE_ARTIFACT_HTML_LANGUAGE : markupType;
+    const before = remaining.slice(0, region.start).trimEnd();
+    if (before) {
+      parts.push(before);
+    }
+    parts.push(`\`\`\`${artifactLanguage}\n${artifact}\n\`\`\``);
+    remaining = remaining.slice(region.end).trimStart();
+  }
+
+  return parts.filter(Boolean).join('\n\n');
 };
 
 const wrapBareLiveArtifactInteraction = (

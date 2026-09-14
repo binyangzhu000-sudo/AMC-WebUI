@@ -3,7 +3,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import type { McpServerConfig } from '../../shared/mcpServerConfig';
 import { createSyncedPersist } from './syncedPersist';
 
-const MCP_RUNTIME_STORAGE_KEY = 'all_model_chat_mcp_runtime_v1';
+const MCP_RUNTIME_STORAGE_KEY = 'all_model_chat_mcp_runtime_v2';
 const { storage: mcpRuntimeSyncedStorage } = createSyncedPersist(MCP_RUNTIME_STORAGE_KEY, {
   debounceMs: 150,
   enableCrossTabSync: false,
@@ -22,16 +22,28 @@ export interface McpRuntimeActions {
   wakeWithServer: (id: string) => void;
   /** Restores "every enabled server" semantics; wakes MCP if it was off. */
   selectAllServers: () => void;
+  /** Clears selection (no servers active). */
+  clearAllServers: () => void;
+  /** Toggles all servers: clears if all are active, selects all otherwise. */
+  toggleAllServers: () => void;
 }
 
 export const useMcpRuntimeStore = create<McpRuntimeSelection & McpRuntimeActions>()(
   persist(
     (set) => ({
-      masterEnabled: true,
+      masterEnabled: false,
       selectedServerIds: null,
       toggleMaster: () => set((state) => ({ masterEnabled: !state.masterEnabled })),
       wakeWithServer: (id) => set({ masterEnabled: true, selectedServerIds: [id] }),
       selectAllServers: () => set({ masterEnabled: true, selectedServerIds: null }),
+      clearAllServers: () => set({ selectedServerIds: [] }),
+      toggleAllServers: () =>
+        set((state) => {
+          if (state.masterEnabled && state.selectedServerIds === null) {
+            return { selectedServerIds: [] };
+          }
+          return { masterEnabled: true, selectedServerIds: null };
+        }),
       toggleServer: (id, allIds) =>
         set((state) => {
           const base = state.selectedServerIds ?? [...allIds];

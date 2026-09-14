@@ -5,6 +5,7 @@ import { CHAT_INPUT_TEXTAREA_SELECTOR } from '@/constants/layout';
 import { cleanupFilePreviewUrls } from '@/utils/file/filePreviewUrls';
 import { getVisibleChatMessages } from '@/utils/chat/visibility';
 import { cloneMessagesWithFreshIds, createNewSession } from '@/utils/chat/session';
+import { placeSessionAfter } from '@/stores/sessionOrder';
 import { updateSessionById } from '@/utils/chat/sessionMutations';
 import { INVALID_FILE_API_KEY_FINGERPRINT } from '@/utils/chat/geminiFilesApi';
 import { resolveUploadableFile } from '@/features/message-sender/fileApiReference';
@@ -13,6 +14,7 @@ import { isGenerationLeaseHeldByOther } from '@/features/message-sender/generati
 import { useChatStore } from '@/stores/chatStore';
 import { toastError } from '@/stores/toastStore';
 import { useI18n } from '@/contexts/I18nContext';
+import { stripLiveArtifactsUserDirective } from '@/features/prompts/promptRegistry';
 
 type ActiveSessionSetter = (id: string | null, options?: { history?: 'push' | 'replace' | 'none' | 'auto' }) => void;
 type SendMessageFunc = (overrideOptions?: {
@@ -82,7 +84,8 @@ export const useMessageActions = ({
       const messageToEdit = messages.find((message) => message.id === messageId);
       if (messageToEdit) {
         if (isLoading) handleStopGenerating();
-        setCommandedInput({ text: messageToEdit.content || '', id: Date.now() });
+        const textToEdit = stripLiveArtifactsUserDirective(messageToEdit.content || '');
+        setCommandedInput({ text: textToEdit, id: Date.now() });
         setSelectedFiles(messageToEdit.files || []);
         setEditingMessageId(messageId);
         setEditMode(mode);
@@ -354,7 +357,7 @@ export const useMessageActions = ({
           'manual',
         );
         forkedSessionId = forkedSession.id;
-        return [forkedSession, ...prev];
+        return placeSessionAfter(prev, forkedSession, sourceSession.id);
       });
 
       if (forkedSessionId) {

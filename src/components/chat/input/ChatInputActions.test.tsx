@@ -1,6 +1,7 @@
 import { act } from 'react';
 import { setupProviderTestRenderer } from '@/test/render/providerRenderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useSettingsStore } from '@/stores/settingsStore';
 import {
   createChatInputActionsContextValue,
   createChatInputComposerStatusContextValue,
@@ -259,17 +260,28 @@ describe('ChatInputActions', () => {
     expect(attachmentMenuMock).not.toHaveBeenCalled();
   });
 
-  it('hides MCP picker on image generation and native audio models', () => {
+  it('disables MCP picker on image generation and native audio models', () => {
     renderActions({ isImageGenerationModel: true });
-    expect(renderer.container.querySelector('[data-testid="mcp-picker-button"]')).toBeNull();
+    const imageBtn = renderer.container.querySelector('[data-testid="mcp-picker-button"]');
+    expect(imageBtn).toBeDisabled();
+    expect(imageBtn).toHaveAttribute('title', 'Current model does not support MCP tools');
 
     renderActions({ isNativeAudioModel: true });
-    expect(renderer.container.querySelector('[data-testid="mcp-picker-button"]')).toBeNull();
+    const audioBtn = renderer.container.querySelector('[data-testid="mcp-picker-button"]');
+    expect(audioBtn).toBeDisabled();
+    expect(audioBtn).toHaveAttribute('title', 'Current model does not support MCP tools');
   });
 
-  it('hides MCP picker and Live controls on third-party provider routes', () => {
+  it('enables MCP picker and hides Live controls on third-party provider routes', () => {
+    useSettingsStore.setState({
+      appSettings: {
+        ...useSettingsStore.getState().appSettings,
+        mcpServers: [{ id: 's1', name: 'Server 1', enabled: true, transport: 'stdio' }],
+      } as never,
+    });
     renderActions({ providerId: 'openai' });
-    expect(renderer.container.querySelector('[data-testid="mcp-picker-button"]')).toBeNull();
+    const mcpBtn = renderer.container.querySelector('[data-testid="mcp-picker-button"]');
+    expect(mcpBtn).not.toBeDisabled();
 
     mockCapabilities.value = {
       ...mockCapabilities.value,

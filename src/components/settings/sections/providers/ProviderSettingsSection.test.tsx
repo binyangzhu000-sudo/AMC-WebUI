@@ -3,8 +3,9 @@ import { setupProviderTestRenderer as setupTestRenderer } from '@/test/render/pr
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setupStoreStateReset } from '@/test/stores/reset';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { useProviderUiStore } from '@/stores/providerUiStore';
 import { createThirdPartyConnection } from '@/test/data/factories';
-import type { AppSettings } from '@/types';
+import { GEMINI_PROVIDER_ID, type AppSettings } from '@/types';
 import { ProviderSettingsSection } from './ProviderSettingsSection';
 
 describe('ProviderSettingsSection', () => {
@@ -72,5 +73,66 @@ describe('ProviderSettingsSection', () => {
     expect(renderer.container.textContent).toContain('API 密钥');
     expect(renderer.container.textContent).toContain('API 地址');
     expect(renderer.container.textContent).toContain('检测');
+  });
+
+  it('persists selectedConnectionId and restores it on render', () => {
+    const conn1 = createThirdPartyConnection({
+      id: 'conn-1',
+      name: 'Provider One',
+      models: [{ id: 'p1-m1', name: 'Model 1', visibleInSelector: true }],
+    });
+    const conn2 = createThirdPartyConnection({
+      id: 'conn-2',
+      name: 'Provider Two',
+      models: [{ id: 'p2-m1', name: 'Model 2', visibleInSelector: true }],
+    });
+
+    const settingsWithTwoConns: AppSettings = {
+      ...useSettingsStore.getState().appSettings,
+      thirdPartyApi: {
+        connections: [conn1, conn2],
+      },
+    };
+
+    // Pre-select conn-2 in providerUiStore
+    useProviderUiStore.getState().setSelectedConnectionId('conn-2');
+
+    act(() => {
+      renderer.root.render(<ProviderSettingsSection {...createProps({ settings: settingsWithTwoConns })} />);
+    });
+
+    expect(renderer.container.textContent).toContain('Provider Two');
+    expect(renderer.container.textContent).toContain('Model 2');
+  });
+
+  it('switches to Gemini and persists selection when Gemini provider is clicked', () => {
+    const conn1 = createThirdPartyConnection({
+      id: 'conn-1',
+      name: 'Provider One',
+      models: [{ id: 'p1-m1', name: 'Model 1', visibleInSelector: true }],
+    });
+
+    const settingsWithConn: AppSettings = {
+      ...useSettingsStore.getState().appSettings,
+      thirdPartyApi: {
+        connections: [conn1],
+      },
+    };
+
+    act(() => {
+      renderer.root.render(<ProviderSettingsSection {...createProps({ settings: settingsWithConn })} />);
+    });
+
+    // Find and click Google Gemini in the list
+    const geminiItem = Array.from(renderer.container.querySelectorAll('span')).find((el) =>
+      el.textContent?.includes('Google Gemini'),
+    );
+    expect(geminiItem).toBeDefined();
+
+    act(() => {
+      geminiItem?.closest('div[class*="cursor-pointer"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(useProviderUiStore.getState().selectedConnectionId).toBe(GEMINI_PROVIDER_ID);
   });
 });

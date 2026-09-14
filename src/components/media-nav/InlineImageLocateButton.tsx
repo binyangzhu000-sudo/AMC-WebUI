@@ -7,6 +7,7 @@ import { useChatStore } from '@/stores/chatStore';
 import { useMediaNavStore } from '@/stores/mediaNavStore';
 import { collectSessionMediaFiles, resolveNamedFile } from '@/utils/media-nav/sessionMediaFiles';
 import { Tooltip } from '@/components/shared/Tooltip';
+import { focusChatInput } from '@/utils/chat-input/focus';
 
 interface InlineImageLocateButtonProps {
   fileName?: string;
@@ -74,6 +75,10 @@ export const InlineImageLocateButton: React.FC<InlineImageLocateButtonProps> = (
     ),
   );
 
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+  };
+
   const handleClick = (e: React.MouseEvent) => {
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && selection.toString().trim().length > 0) {
@@ -91,6 +96,7 @@ export const InlineImageLocateButton: React.FC<InlineImageLocateButtonProps> = (
       snippet,
       messageId,
     });
+    focusChatInput(0, { caret: 'end', retries: 4 });
   };
 
   const labelText = extractTextFromNode(children);
@@ -100,7 +106,7 @@ export const InlineImageLocateButton: React.FC<InlineImageLocateButtonProps> = (
     <div className="flex flex-col gap-1.5 max-w-[240px] text-xs select-none">
       <div className="flex items-center gap-1.5 font-semibold text-[var(--theme-text-primary)]">
         <span className="w-1.5 h-1.5 rounded-full bg-red-500 flex-shrink-0" />
-        <span className="truncate">{label || snippet || '目标定位'}</span>
+        <span className="truncate">{label || snippet || t('imageNavDefaultTarget')}</span>
       </div>
 
       {imageFile?.dataUrl ? (
@@ -148,7 +154,7 @@ export const InlineImageLocateButton: React.FC<InlineImageLocateButtonProps> = (
                 }}
               />
             </div>
-            <span className="text-[10px] text-[var(--theme-text-tertiary)] opacity-80">精准视觉框选</span>
+            <span className="text-[10px] text-[var(--theme-text-tertiary)] opacity-80">{t('imageNavPreciseBox')}</span>
           </div>
         )
       )}
@@ -158,7 +164,7 @@ export const InlineImageLocateButton: React.FC<InlineImageLocateButtonProps> = (
           {snippet}
         </div>
       )}
-      <div className="text-[10px] text-[var(--theme-text-tertiary)] opacity-80">点击展开大图定位</div>
+      <div className="text-[10px] text-[var(--theme-text-tertiary)] opacity-80">{t('imageNavClickToExpand')}</div>
     </div>
   );
 
@@ -166,6 +172,7 @@ export const InlineImageLocateButton: React.FC<InlineImageLocateButtonProps> = (
     <Tooltip text={tooltipPreview} side="top" align="center" asChild delayDuration={300}>
       <button
         type="button"
+        onMouseDown={handleMouseDown}
         onClick={handleClick}
         className={`inline-flex items-center gap-1 px-1.5 py-0.5 -my-0.5 mx-0.5 rounded-[5px] text-[0.82em] active:scale-[0.97] transition-all cursor-pointer align-baseline ${
           isActive

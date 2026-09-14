@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Repeat, X } from 'lucide-react';
 import { useI18n } from '@/contexts/I18nContext';
+import { interpolate } from '@/i18n/interpolate';
 import type { UploadedFile } from '@/types';
 import { useMediaNavStore } from '@/stores/mediaNavStore';
 import { useChatStore } from '@/stores/chatStore';
@@ -10,6 +11,7 @@ import { type VideoAnnotation } from './VideoHighlightOverlay';
 import { VideoPlayer, type VideoPlayerHandle } from '@/components/shared/file-preview/VideoPlayer';
 import { isYoutubeVideoFile } from '@/utils/media-nav/sessionMediaFiles';
 import { YoutubeNavPlayer } from './YoutubeNavPlayer';
+import { focusChatInput } from '@/utils/chat-input/focus';
 
 interface MediaNavViewProps {
   file: UploadedFile;
@@ -253,15 +255,18 @@ const MediaNavViewComponent: React.FC<MediaNavViewProps> = ({ file, kind }) => {
                   <div className="flex items-center justify-between text-xs text-[var(--theme-text-secondary)]">
                     <span className="font-medium flex items-center gap-1.5">
                       <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                      时间轴标记点
+                      {t('mediaNavTimelineMarkers')}
                     </span>
-                    <span className="font-mono text-[11px] opacity-75">{timelineMarkers.length} 处</span>
+                    <span className="font-mono text-[11px] opacity-75">
+                      {interpolate(t('mediaNavMarkerCount'), { count: timelineMarkers.length })}
+                    </span>
                   </div>
                   <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pr-1">
                     {timelineMarkers.map((marker) => (
                       <button
                         key={marker.id}
                         type="button"
+                        onMouseDown={(e) => e.preventDefault()}
                         onClick={() => {
                           if (audioRef.current) {
                             audioRef.current.currentTime = Math.max(0, marker.time);
@@ -274,6 +279,7 @@ const MediaNavViewComponent: React.FC<MediaNavViewProps> = ({ file, kind }) => {
                               // Fallback for mock environments
                             }
                           }
+                          focusChatInput(0, { caret: 'end', retries: 4 });
                         }}
                         className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono bg-[var(--theme-bg-tertiary)] hover:bg-[var(--theme-bg-accent)] hover:text-white transition-all cursor-pointer border border-[var(--theme-border-secondary)] shadow-sm"
                         title={marker.snippet}

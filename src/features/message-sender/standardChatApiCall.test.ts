@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_APP_SETTINGS, DEFAULT_CHAT_SETTINGS } from '@/constants/settingsDefaults';
+import { useMcpRuntimeStore } from '@/stores/mcpRuntimeStore';
 import type { ContentPart } from '@/types';
+import { getLiveArtifactsUserDirective } from '@/features/prompts/liveArtifacts';
 import { performStandardChatApiCall } from './standardChatApiCall';
 
 const mocks = vi.hoisted(() => ({
@@ -12,10 +14,12 @@ const mocks = vi.hoisted(() => ({
   generateContentTurnApi: vi.fn(),
   sendStatelessMessageNonStreamApi: vi.fn(),
   sendStatelessMessageStreamApi: vi.fn(),
+  generateOpenAICompatibleTurnApi: vi.fn(),
   sendOpenAICompatibleMessageNonStream: vi.fn(),
   sendOpenAICompatibleMessageStream: vi.fn(),
   sendOpenAIResponsesNonStream: vi.fn(),
   sendOpenAIResponsesStream: vi.fn(),
+  generateAnthropicTurnApi: vi.fn(),
   sendAnthropicMessageNonStream: vi.fn(),
   sendAnthropicMessageStream: vi.fn(),
   createMcpClientFunctions: vi.fn(),
@@ -59,6 +63,7 @@ vi.mock('@/services/api/chatApi', () => ({
   sendStatelessMessageStreamApi: mocks.sendStatelessMessageStreamApi,
 }));
 vi.mock('@/services/api/openaiCompatibleApi', () => ({
+  generateOpenAICompatibleTurnApi: mocks.generateOpenAICompatibleTurnApi,
   sendOpenAICompatibleMessageNonStream: mocks.sendOpenAICompatibleMessageNonStream,
   sendOpenAICompatibleMessageStream: mocks.sendOpenAICompatibleMessageStream,
 }));
@@ -67,6 +72,7 @@ vi.mock('@/services/api/openaiResponsesApi', () => ({
   sendOpenAIResponsesStream: mocks.sendOpenAIResponsesStream,
 }));
 vi.mock('@/services/api/anthropicApi', () => ({
+  generateAnthropicTurnApi: mocks.generateAnthropicTurnApi,
   sendAnthropicMessageNonStream: mocks.sendAnthropicMessageNonStream,
   sendAnthropicMessageStream: mocks.sendAnthropicMessageStream,
 }));
@@ -121,6 +127,7 @@ describe('performStandardChatApiCall', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    useMcpRuntimeStore.setState({ masterEnabled: false, selectedServerIds: null });
     handlers = {
       streamOnError: vi.fn(),
       streamOnComplete: vi.fn(),
@@ -251,6 +258,7 @@ describe('performStandardChatApiCall', () => {
   });
 
   it('runs the tool loop, injects internal tool messages, and replays the final turn', async () => {
+    useMcpRuntimeStore.setState({ masterEnabled: true, selectedServerIds: null });
     mocks.createMcpClientFunctions.mockResolvedValue({
       mcpTool: { declaration: { name: 'mcpTool' }, handler: vi.fn() },
     });
@@ -500,6 +508,194 @@ describe('performStandardChatApiCall', () => {
     expect(mocks.buildGenerationConfig).toHaveBeenCalledWith(
       expect.objectContaining({
         systemInstruction: expect.not.stringContaining('Live Artifacts Protocol'),
+      }),
+    );
+  });
+
+  it('executes runStandardToolLoop when third-party provider route has enabled MCP tools', async () => {
+    mocks.resolveChatApiRoute.mockReturnValue({
+      provider: {
+        id: 'conn-1',
+        templateId: 'dashscope',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        protocol: 'openai-compatible',
+        models: [{ id: 'qwen3.8-flash' }],
+      },
+    });
+
+    mocks.createChatHistoryForApi.mockResolvedValue([]);
+    mocks.createMcpClientFunctions.mockResolvedValue({
+      mcp_test_tool: {
+        declaration: { name: 'mcp_test_tool', parameters: { type: 'OBJECT', properties: {} } },
+        handler: vi.fn(),
+      },
+    });
+    mocks.runStandardToolLoop.mockResolvedValue({
+      finalTurn: {
+        modelContent: { role: 'model', parts: [{ text: 'Result from third party tool loop' }] },
+        parts: [{ text: 'Result from third party tool loop' }],
+        usage: { totalTokenCount: 42 },
+      },
+      toolMessages: [],
+      generatedFiles: [],
+    });
+
+    const mcpServer = {
+      id: 'srv-1',
+      name: 'Server 1',
+      enabled: true,
+      transport: 'stdio' as const,
+    };
+    useMcpRuntimeStore.setState({ masterEnabled: true, selectedServerIds: null });
+
+    const params = baseParams({
+      appSettings: {
+        ...DEFAULT_APP_SETTINGS,
+        mcpServers: [mcpServer],
+      },
+      text: 'Check via tool',
+      activeModelId: 'qwen3.8-flash',
+    });
+
+    await performStandardChatApiCall(params as never);
+
+    expect(mocks.runStandardToolLoop).toHaveBeenCalledTimes(1);
+    expect(mocks.sendOpenAICompatibleMessageStream).not.toHaveBeenCalled();
+    expect(handlers.streamOnPart).toHaveBeenCalledWith(
+      { text: 'Result from third party tool loop' },
+      expect.objectContaining({ source: 'third-party' }),
+    );
+    expect(handlers.streamOnComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ totalTokenCount: 42 }),
+      undefined,
+      undefined,
+    );
+  });
+
+  it('prepends Live Artifacts layout directive to user finalParts and omits it from system instruction', async () => {
+    mocks.sendStatelessMessageStreamApi.mockImplementation(
+      async (_key, _model, _history, _parts, _config, _signal, _part, _thought, _error, onComplete) => {
+        onComplete();
+      },
+    );
+
+    const params = baseParams({
+      appSettings: {
+        ...DEFAULT_APP_SETTINGS,
+        language: 'zh',
+      },
+      sessionToUpdate: {
+        ...DEFAULT_CHAT_SETTINGS,
+        isLiveArtifactsEnabled: true,
+        isVisualFormattingActive: true,
+        systemInstruction: 'Custom system prompt',
+      },
+      resolveTurn: () => ({
+        baseMessagesForApi: [],
+        finalRole: 'user' as const,
+        finalParts: [{ text: '帮我设计一个看板' }],
+        shouldSkipApiCall: false,
+      }),
+    });
+
+    await performStandardChatApiCall(params as never);
+
+    expect(mocks.buildGenerationConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemInstruction: expect.stringContaining('Custom system prompt'),
+      }),
+    );
+    expect(mocks.buildGenerationConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemInstruction: expect.stringContaining('[Live Artifacts Inline Protocol]'),
+      }),
+    );
+
+    expect(mocks.sendStatelessMessageStreamApi).toHaveBeenCalledTimes(1);
+    const sentParts = mocks.sendStatelessMessageStreamApi.mock.calls[0][3];
+    expect(sentParts[0].text).toContain(getLiveArtifactsUserDirective('zh'));
+    expect(sentParts[0].text).toContain('帮我设计一个看板');
+  });
+
+  it('includes Live Artifacts in system instruction when isVisualFormattingActive is true even if isLiveArtifactsEnabled is false', async () => {
+    mocks.sendStatelessMessageStreamApi.mockImplementation(
+      async (_key, _model, _history, _parts, _config, _signal, _part, _thought, _error, onComplete) => {
+        onComplete();
+      },
+    );
+
+    const params = baseParams({
+      appSettings: {
+        ...DEFAULT_APP_SETTINGS,
+        language: 'zh',
+      },
+      sessionToUpdate: {
+        ...DEFAULT_CHAT_SETTINGS,
+        isLiveArtifactsEnabled: false,
+        isVisualFormattingActive: true,
+        systemInstruction: 'Base system prompt',
+      },
+      resolveTurn: () => ({
+        baseMessagesForApi: [],
+        finalRole: 'user' as const,
+        finalParts: [{ text: '帮我设计一个看板' }],
+        shouldSkipApiCall: false,
+      }),
+    });
+
+    await performStandardChatApiCall(params as never);
+
+    expect(mocks.buildGenerationConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemInstruction: expect.stringContaining('Base system prompt'),
+      }),
+    );
+    expect(mocks.buildGenerationConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemInstruction: expect.stringContaining('[Live Artifacts Inline Protocol]'),
+      }),
+    );
+
+    expect(mocks.sendStatelessMessageStreamApi).toHaveBeenCalledTimes(1);
+    const sentParts = mocks.sendStatelessMessageStreamApi.mock.calls[0][3];
+    expect(sentParts[0].text).toContain(getLiveArtifactsUserDirective('zh'));
+  });
+
+  it('does not prepend Live Artifacts layout directive when isLiveArtifactsEnabled is true but isVisualFormattingActive is false', async () => {
+    mocks.sendStatelessMessageStreamApi.mockImplementation(
+      async (_key, _model, _history, _parts, _config, _signal, _part, _thought, _error, onComplete) => {
+        onComplete();
+      },
+    );
+
+    const params = baseParams({
+      appSettings: {
+        ...DEFAULT_APP_SETTINGS,
+        language: 'zh',
+      },
+      sessionToUpdate: {
+        ...DEFAULT_CHAT_SETTINGS,
+        isLiveArtifactsEnabled: true,
+        isVisualFormattingActive: false,
+        systemInstruction: 'Custom system prompt',
+      },
+      resolveTurn: () => ({
+        baseMessagesForApi: [],
+        finalRole: 'user' as const,
+        finalParts: [{ text: '帮我设计一个看板' }],
+        shouldSkipApiCall: false,
+      }),
+    });
+
+    await performStandardChatApiCall(params as never);
+
+    expect(mocks.sendStatelessMessageStreamApi).toHaveBeenCalledTimes(1);
+    const sentParts = mocks.sendStatelessMessageStreamApi.mock.calls[0][3];
+    expect(sentParts[0].text).not.toContain(getLiveArtifactsUserDirective('zh'));
+    expect(sentParts[0].text).toBe('帮我设计一个看板');
+    expect(mocks.buildGenerationConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemInstruction: expect.stringContaining('Live Artifacts'),
       }),
     );
   });

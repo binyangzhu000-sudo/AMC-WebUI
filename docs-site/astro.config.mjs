@@ -24,9 +24,13 @@ export default defineConfig({
           lang: 'en',
         },
       },
-      social: {
-        github: 'https://github.com/yeahhe365/AMC-WebUI',
-      },
+      social: [
+        {
+          icon: 'github',
+          label: 'GitHub',
+          href: 'https://github.com/yeahhe365/AMC-WebUI',
+        },
+      ],
       lastUpdated: true,
       editLink: {
         baseUrl: 'https://github.com/yeahhe365/AMC-WebUI/edit/main/docs-site/',
@@ -52,7 +56,7 @@ export default defineConfig({
           },
         },
       ],
-      customCss: ['./src/styles/custom.css'],
+      customCss: ['./src/styles/custom.css', './src/styles/home.css'],
       sidebar: [
         {
           label: '🚀 快速上手',

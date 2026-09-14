@@ -9,6 +9,23 @@ export interface ModelCapabilities {
   thinking?: boolean;
   tools?: boolean;
   webSearch?: boolean;
+  image?: boolean;
+  embedding?: boolean;
+  audio?: boolean;
+  free?: boolean;
+}
+
+export interface ModelParameters {
+  temperature?: number;
+  maxOutputTokens?: number;
+  topP?: number;
+  topK?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
+  stopSequences?: string[];
+  seed?: number;
+  reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
+  thinkingBudget?: number;
 }
 
 export interface ModelOption {
@@ -41,11 +58,7 @@ export interface ModelOption {
   /** Creator or vendor who owns the model architecture. */
   ownedBy?: string;
   /** Custom model parameters overriding session defaults. */
-  parameters?: {
-    temperature?: number;
-    maxOutputTokens?: number;
-    topP?: number;
-  };
+  parameters?: ModelParameters;
 }
 
 export enum HarmCategory {
@@ -131,14 +144,13 @@ export const THIRD_PARTY_TEMPLATE_IDS = [
   'grok',
   'ollama',
   'lmstudio',
-  'baichuan',
-  'stepfun',
-  'yi',
   'doubao',
   'mistral',
-  'perplexity',
   'cerebras',
   'fireworks',
+  'opencode',
+  'hunyuan',
+  'huggingface',
   'atlascloud',
   'custom-openai',
   'custom-anthropic',
@@ -213,6 +225,9 @@ export interface GeoLocationCoordinates {
 
 export type VisionPromptMode = 'bbox' | 'hdGuide' | null;
 
+export const TASK_SUGGESTION_MODES = ['translate', 'ocr', 'asr', 'srt', 'explain', 'summarize'] as const;
+export type TaskSuggestionMode = (typeof TASK_SUGGESTION_MODES)[number];
+
 export interface ChatSettings {
   modelId: string;
   /** Which provider this session's modelId belongs to. Absent = gemini-native. */
@@ -223,7 +238,9 @@ export interface ChatSettings {
   showThoughts: boolean;
   systemInstruction: string;
   isLiveArtifactsEnabled?: boolean;
+  isVisualFormattingActive?: boolean;
   visionPromptMode?: VisionPromptMode;
+  taskSuggestionMode?: TaskSuggestionMode | null;
   ttsVoice: string;
   thinkingBudget: number;
   thinkingLevel?: ThinkingLevel;
@@ -360,6 +377,7 @@ export type MessageAppSettings = Pick<
   | 'liveArtifactsCustomFontSize'
   | 'systemInstruction'
   | 'isLiveArtifactsEnabled'
+  | 'isVisualFormattingActive'
   | 'liveArtifactsPromptMode'
   | 'liveArtifactsSystemPrompt'
   | 'liveArtifactsSystemPrompts'

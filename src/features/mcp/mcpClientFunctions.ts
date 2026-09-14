@@ -1,5 +1,5 @@
 import { Type, type Schema } from '@google/genai';
-import type { McpServerConfig, StandardClientFunctions } from '@/types';
+import type { McpServerConfig, StandardClientFunctions, UploadedFile } from '@/types';
 import {
   callMcpTool,
   fetchMcpTools,
@@ -20,10 +20,14 @@ import {
   type McpApprovalDecision,
   type McpApprovalRequest,
 } from './toolApproval';
+import { rememberDiscoveredTools } from './toolDisplayNames';
+import { getVirtualMcpServers, type VirtualMcpServer } from './virtualMcpRegistry';
 
 interface CreateMcpClientFunctionsOptions {
   servers: McpServerConfig[];
+  virtualServers?: VirtualMcpServer[];
   abortSignal?: AbortSignal;
+
   listTools?: (servers: McpServerConfig[], abortSignal?: AbortSignal) => Promise<McpToolsResponse>;
   callTool?: (
     server: McpServerConfig,
@@ -299,6 +303,7 @@ const formatDiscoveryErrors = (errors: Array<{ serverId: string; serverName: str
  */
 export const createMcpClientFunctions = async ({
   servers,
+  virtualServers = getVirtualMcpServers(),
   abortSignal,
   listTools = fetchMcpTools,
   callTool = callMcpTool,
@@ -306,79 +311,52 @@ export const createMcpClientFunctions = async ({
   resolveLatestServers,
 }: CreateMcpClientFunctionsOptions): Promise<StandardClientFunctions> => {
   const enabledServers = servers.filter((server) => server.enabled);
-  if (enabledServers.length === 0) {
+  if (enabledServers.length === 0 && virtualServers.length === 0) {
     return {};
   }
 
   try {
-    const runtimeServerEntries = makeRuntimeServerEntries(enabledServers);
-    const runtimeServers = runtimeServerEntries.map(({ runtimeServer }) => runtimeServer);
-    const lister: McpToolsLister = listTools;
-    const configKey = JSON.stringify(
-      runtimeServers.map((s) => ({
-        id: s.id,
-        url: s.url,
-        command: s.command,
-        disabledTools: s.disabledTools,
-        disabledAutoApproveTools: s.disabledAutoApproveTools,
-        isTrusted: s.isTrusted,
-      })),
-    );
-    const cachedResponse = readCachedTools(lister, configKey);
-    const toolResponse = cachedResponse ?? (await listTools(runtimeServers, abortSignal));
-    if (!cachedResponse) {
-      discoveryCache.set(lister, {
-        configKey,
-        expiresAt: Date.now() + MCP_DISCOVERY_CACHE_TTL_MS,
-        response: toolResponse,
-      });
-    }
-
-    if (toolResponse.errors.length > 0) {
-      logService.warn(`MCP tool discovery reported errors: ${formatDiscoveryErrors(toolResponse.errors)}`, {
-        errors: toolResponse.errors,
-      });
-    }
-
-    const serverDisabledMap = new Map(runtimeServers.map((s) => [s.id, new Set(s.disabledTools ?? [])]));
-    const filteredServers = toolResponse.servers.map((s) => ({
-      ...s,
-      tools: s.tools.filter((t) => !serverDisabledMap.get(s.serverId)?.has(t.name)),
-    }));
-
-    const serverByRuntimeId = new Map(
-      runtimeServerEntries.map(({ originalServer, runtimeServer }) => [runtimeServer.id, originalServer]),
-    );
     const functions: StandardClientFunctions = {};
 
-    for (const serverTools of filteredServers) {
-      const server = serverByRuntimeId.get(serverTools.serverId);
-      if (!server) {
-        continue;
+    for (const virtualServer of virtualServers) {
+      let vTools: McpToolDefinition[] = [];
+      try {
+        vTools = await virtualServer.listTools();
+        rememberDiscoveredTools({
+          servers: [
+            {
+              serverId: virtualServer.id,
+              serverName: virtualServer.name,
+              tools: vTools,
+            },
+          ],
+        });
+      } catch (error) {
+        logService.warn(`Virtual MCP tool discovery failed for ${virtualServer.id}`, { error });
       }
 
-      for (const tool of serverTools.tools) {
-        const functionName = toMcpFunctionName(serverTools.serverId, tool.name);
+      for (const tool of vTools) {
+        const functionName = toMcpFunctionName(virtualServer.id, tool.name);
         functions[functionName] = {
           declaration: {
             name: functionName,
-            description: buildDescription(serverTools.serverName, tool),
+            description: buildDescription(virtualServer.name, tool),
             parameters: toGeminiSchema(tool.inputSchema),
           },
           handler: async (args, options) => {
-            // Execution-time disable re-check: discovery results are cached
-            // for 30s, so honor what the user toggled after this turn began.
-            const latestServers = resolveLatestServers?.();
-            const latestServer = latestServers?.find((entry) => entry.id === server.id);
-            if (latestServer && (!latestServer.enabled || (latestServer.disabledTools ?? []).includes(tool.name))) {
-              throw new Error(`Tool ${tool.name} on ${serverTools.serverName} was disabled by the user.`);
-            }
-            if (requestApproval && requiresApproval(server, tool.name)) {
-              const approvalKey = sessionApprovalKey(server.id, tool.name);
+            const dummyServerConfig: McpServerConfig = {
+              id: virtualServer.id,
+              name: virtualServer.name,
+              enabled: true,
+              transport: 'stdio',
+              disabledAutoApproveTools: virtualServer.disabledAutoApproveTools,
+            };
+            if (requestApproval && requiresApproval(dummyServerConfig, tool.name)) {
+              const approvalKey = sessionApprovalKey(virtualServer.id, tool.name);
               if (!isSessionApproved(approvalKey)) {
                 const decision = await requestApproval({
-                  serverId: server.id,
-                  serverName: serverTools.serverName,
+                  serverId: virtualServer.id,
+                  serverName: virtualServer.name,
                   toolName: tool.name,
                   args: isRecord(args) ? args : {},
                 });
@@ -390,21 +368,16 @@ export const createMcpClientFunctions = async ({
                 }
               }
             }
-            // Surface the call live: the card rendered from the FunctionCall
-            // part holds this exact args object, so the run attaches to it.
+
             const callArgs = isRecord(args) ? args : {};
             const runId = beginMcpToolRun(callArgs);
             try {
-              const rawResult = await callTool(
-                server,
+              const rawResult = await virtualServer.callTool(
                 tool.name,
                 callArgs,
                 options?.abortSignal ?? abortSignal,
                 (event) => appendMcpToolProgress(runId, event),
               );
-              // MCP signals execution failure with isError:true on a successful
-              // RPC — surface it as an error response so the model can recover
-              // and the tool card reports the run as failed.
               const callError = extractMcpCallError(rawResult);
               if (callError) {
                 finishMcpToolRun(runId, 'error');
@@ -413,6 +386,10 @@ export const createMcpClientFunctions = async ({
               finishMcpToolRun(runId, 'success');
               return {
                 response: summarizeMcpResultForModel(rawResult),
+                generatedFiles:
+                  isRecord(rawResult) && Array.isArray(rawResult.generatedFiles)
+                    ? (rawResult.generatedFiles as UploadedFile[])
+                    : undefined,
               };
             } catch (error) {
               finishMcpToolRun(runId, options?.abortSignal?.aborted ? 'cancelled' : 'error');
@@ -423,10 +400,126 @@ export const createMcpClientFunctions = async ({
       }
     }
 
+    if (enabledServers.length > 0) {
+      const runtimeServerEntries = makeRuntimeServerEntries(enabledServers);
+      const runtimeServers = runtimeServerEntries.map(({ runtimeServer }) => runtimeServer);
+      const lister: McpToolsLister = listTools;
+      const configKey = JSON.stringify(
+        runtimeServers.map((s) => ({
+          id: s.id,
+          url: s.url,
+          command: s.command,
+          disabledTools: s.disabledTools,
+          disabledAutoApproveTools: s.disabledAutoApproveTools,
+          isTrusted: s.isTrusted,
+        })),
+      );
+      const cachedResponse = readCachedTools(lister, configKey);
+      const toolResponse = cachedResponse ?? (await listTools(runtimeServers, abortSignal));
+      if (!cachedResponse) {
+        discoveryCache.set(lister, {
+          configKey,
+          expiresAt: Date.now() + MCP_DISCOVERY_CACHE_TTL_MS,
+          response: toolResponse,
+        });
+      }
+
+      if (toolResponse.errors.length > 0) {
+        logService.warn(`MCP tool discovery reported errors: ${formatDiscoveryErrors(toolResponse.errors)}`, {
+          errors: toolResponse.errors,
+        });
+      }
+
+      const serverDisabledMap = new Map(runtimeServers.map((s) => [s.id, new Set(s.disabledTools ?? [])]));
+      const filteredServers = toolResponse.servers.map((s) => ({
+        ...s,
+        tools: s.tools.filter((t) => !serverDisabledMap.get(s.serverId)?.has(t.name)),
+      }));
+
+      const serverByRuntimeId = new Map(
+        runtimeServerEntries.map(({ originalServer, runtimeServer }) => [runtimeServer.id, originalServer]),
+      );
+
+      for (const serverTools of filteredServers) {
+        const server = serverByRuntimeId.get(serverTools.serverId);
+        if (!server) {
+          continue;
+        }
+
+        for (const tool of serverTools.tools) {
+          const functionName = toMcpFunctionName(serverTools.serverId, tool.name);
+          functions[functionName] = {
+            declaration: {
+              name: functionName,
+              description: buildDescription(serverTools.serverName, tool),
+              parameters: toGeminiSchema(tool.inputSchema),
+            },
+            handler: async (args, options) => {
+              // Execution-time disable re-check: discovery results are cached
+              // for 30s, so honor what the user toggled after this turn began.
+              const latestServers = resolveLatestServers?.();
+              const latestServer = latestServers?.find((entry) => entry.id === server.id);
+              if (latestServer && (!latestServer.enabled || (latestServer.disabledTools ?? []).includes(tool.name))) {
+                throw new Error(`Tool ${tool.name} on ${serverTools.serverName} was disabled by the user.`);
+              }
+              if (requestApproval && requiresApproval(server, tool.name)) {
+                const approvalKey = sessionApprovalKey(server.id, tool.name);
+                if (!isSessionApproved(approvalKey)) {
+                  const decision = await requestApproval({
+                    serverId: server.id,
+                    serverName: serverTools.serverName,
+                    toolName: tool.name,
+                    args: isRecord(args) ? args : {},
+                  });
+                  if (decision === 'deny') {
+                    throw new Error(`User denied tool execution: ${tool.name}`);
+                  }
+                  if (decision === 'allow-session') {
+                    rememberSessionApproval(approvalKey);
+                  }
+                }
+              }
+              // Surface the call live: the card rendered from the FunctionCall
+              // part holds this exact args object, so the run attaches to it.
+              const callArgs = isRecord(args) ? args : {};
+              const runId = beginMcpToolRun(callArgs);
+              try {
+                const rawResult = await callTool(
+                  server,
+                  tool.name,
+                  callArgs,
+                  options?.abortSignal ?? abortSignal,
+                  (event) => appendMcpToolProgress(runId, event),
+                );
+                // MCP signals execution failure with isError:true on a successful
+                const callError = extractMcpCallError(rawResult);
+                if (callError) {
+                  finishMcpToolRun(runId, 'error');
+                  throw new Error(callError);
+                }
+                finishMcpToolRun(runId, 'success');
+                return {
+                  response: summarizeMcpResultForModel(rawResult),
+                  generatedFiles:
+                    isRecord(rawResult) && Array.isArray(rawResult.generatedFiles)
+                      ? (rawResult.generatedFiles as UploadedFile[])
+                      : undefined,
+                };
+              } catch (error) {
+                finishMcpToolRun(runId, options?.abortSignal?.aborted ? 'cancelled' : 'error');
+                throw error;
+              }
+            },
+          };
+        }
+      }
+    }
+
     const totalToolCount = Object.keys(functions).length;
+    const totalServerCount = enabledServers.length + virtualServers.length;
     if (totalToolCount > MCP_TOOL_COUNT_GUIDANCE_MAX) {
       logService.warn(
-        `${totalToolCount} MCP tools are active across ${filteredServers.length} server(s). ` +
+        `${totalToolCount} MCP tools are active across ${totalServerCount} server(s). ` +
           'Gemini guidance recommends keeping the active set to about 10-20 tools to avoid mis-selection and input-token bloat.',
         { totalToolCount },
       );

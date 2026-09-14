@@ -44,6 +44,16 @@ const ChatInputActionsComponent: React.FC = () => {
   const { canQueueMessage } = useChatInputComposerStatusContext();
   const isGemma = isGemmaModel(currentModelId);
   const isGeminiNative = providerId === undefined || providerId === GEMINI_PROVIDER_ID;
+  const isThirdPartyChatModel = !isGeminiNative && !isImageGenerationModel;
+  const isMcpSupported =
+    (isGeminiNative || isThirdPartyChatModel) &&
+    !isTtsModel &&
+    !isLiveTranslate &&
+    !isLiveTranscribe &&
+    !isTranscribeModel &&
+    !isNativeAudioModel &&
+    !isImageGenerationModel &&
+    !isGemma;
   const focusedToolStates = useMemo(
     () => ({
       googleSearch: {
@@ -56,12 +66,6 @@ const ChatInputActionsComponent: React.FC = () => {
         isEnabled: !!toolStates.codeExecution?.isEnabled,
         onToggle: toolStates.codeExecution?.onToggle
           ? () => onToggleToolAndFocus(toolStates.codeExecution!.onToggle!)
-          : undefined,
-      },
-      localPython: {
-        isEnabled: !!toolStates.localPython?.isEnabled,
-        onToggle: toolStates.localPython?.onToggle
-          ? () => onToggleToolAndFocus(toolStates.localPython!.onToggle!)
           : undefined,
       },
       urlContext: {
@@ -175,14 +179,10 @@ const ChatInputActionsComponent: React.FC = () => {
           disabled={disabled}
         />
 
-        {isGeminiNative &&
-          !isTtsModel &&
-          !isLiveTranslate &&
-          !isLiveTranscribe &&
-          !isTranscribeModel &&
-          !isNativeAudioModel &&
-          !isImageGenerationModel &&
-          !isGemma && <McpPickerMenu disabled={disabled} />}
+        <McpPickerMenu
+          disabled={disabled || !isMcpSupported}
+          disabledReason={!isMcpSupported ? t('mcpPickerModelNotSupported') : undefined}
+        />
       </div>
 
       <div
